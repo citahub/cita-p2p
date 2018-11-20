@@ -1,0 +1,9 @@
+[package]
+name = "network"
+version = "0.1.0"
+authors = ["piaoliu <441594700@qq.com>"]
+
+[dependencies]
+core-p2p = { path = "../core-p2p" }
+futures = "0.1"
+tokio = "0.1"

@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use futures::prelude::*;
 use libp2p::core::nodes::handled_node::{NodeHandler, NodeHandlerEndpoint, NodeHandlerEvent};
 use libp2p::core::{upgrade, Endpoint};
@@ -7,13 +6,18 @@ use std::io::{Error, ErrorKind};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use crate::custom_proto::{
+    cita_proto::{CitaRequest, CitaResponse},
+    custom_proto::{CustomProtocol, CustomProtocolSubstream},
+};
+
 #[derive(Debug, Clone)]
 pub enum CITAInEvent {
     Accept,
-    SendCustomMessage { protocol: usize, data: Vec<u8> },
+    SendCustomMessage { protocol: usize, data: CitaRequest },
     Ping,
 }
-
+#[derive(Debug)]
 pub enum CITAOutEvent {
     Unresponsive,
     CustomProtocolOpen {
@@ -26,7 +30,7 @@ pub enum CITAOutEvent {
     },
     CustomMessage {
         protocol: usize,
-        data: Bytes,
+        data: CitaResponse,
     },
     PingStart,
     PingSuccess(Duration),
@@ -47,7 +51,7 @@ enum FinalUpgrade<Substream> {
     //    IdentifyDialer(identify::IdentifyInfo, libp2p::Multiaddr),
     PingDialer(ping::protocol::PingDialer<Substream, Instant>),
     PingListener(ping::protocol::PingListener<Substream>),
-    Custom(()),
+    Custom(CustomProtocolSubstream<Substream>),
 }
 
 impl<Substream> From<ping::protocol::PingOutput<Substream, Instant>> for FinalUpgrade<Substream> {
@@ -60,18 +64,20 @@ impl<Substream> From<ping::protocol::PingOutput<Substream, Instant>> for FinalUp
 }
 
 pub struct CITANodeHandler<Substream> {
+    /// Substream open for custom protocol
+    custom_protocols_substream: Option<CustomProtocolSubstream<Substream>>,
     /// Substream open for sending pings, if any.
     ping_out_substream: Option<ping::protocol::PingDialer<Substream, Instant>>,
     /// Substreams open for receiving pings.
     ping_in_substreams: Vec<ping::protocol::PingListener<Substream>>,
     /// Substreams being upgraded on the listening side.
     upgrades_in_progress_listen:
-        Vec<Box<Future<Item = FinalUpgrade<Substream>, Error = Error> + Send>>,
+        Vec<Box<dyn Future<Item = FinalUpgrade<Substream>, Error = Error> + Send>>,
     /// Substreams being upgraded on the dialing side. Contrary to `upgrades_in_progress_listen`,
     /// these have a known purpose.
     upgrades_in_progress_dial: Vec<(
         UpgradePurpose,
-        Box<Future<Item = FinalUpgrade<Substream>, Error = Error> + Send>,
+        Box<dyn Future<Item = FinalUpgrade<Substream>, Error = Error> + Send>,
     )>,
 
     queued_dial_upgrades: Vec<UpgradePurpose>,
@@ -86,19 +92,24 @@ where
     Substream: AsyncRead + AsyncWrite + Send + 'static,
 {
     pub fn new() -> Self {
-        let queued_dial_upgrades = vec![UpgradePurpose::Ping];
+        let queued_dial_upgrades = vec![UpgradePurpose::Ping, UpgradePurpose::Custom(0)];
         CITANodeHandler {
+            custom_protocols_substream: None,
             ping_out_substream: None,
             ping_in_substreams: Vec::with_capacity(1),
             upgrades_in_progress_listen: Vec::with_capacity(1),
             upgrades_in_progress_dial: Vec::with_capacity(1),
             queued_dial_upgrades,
-            num_out_user_must_open: 1,
+            num_out_user_must_open: 2,
             notify: None,
         }
     }
 
-    fn send_custom_message(&mut self, protocol: usize, data: Vec<u8>) {}
+    fn send_custom_message(&mut self, _protocol: usize, data: CitaRequest) {
+        if let Some(ref mut custom) = self.custom_protocols_substream {
+            custom.send_message(data);
+        }
+    }
 
     fn inject_fully_negotiated(
         &mut self,
@@ -121,7 +132,21 @@ where
                 self.ping_in_substreams.push(ping_listener);
                 None
             }
-            _ => None,
+            FinalUpgrade::Custom(proto) => {
+                self.upgrades_in_progress_dial
+                    .retain(|&(purp, _)| &purp != &UpgradePurpose::Custom(proto.protocol_id()));
+                self.queued_dial_upgrades
+                    .retain(|u| u != &UpgradePurpose::Custom(proto.protocol_id()));
+                if self.custom_protocols_substream.is_some() {
+                    return None;
+                }
+                let event = CITAOutEvent::CustomProtocolOpen {
+                    protocol: proto.protocol_id(),
+                    version: proto.protocol_version(),
+                };
+                self.custom_protocols_substream = Some(proto);
+                Some(event)
+            }
         }
     }
 
@@ -151,7 +176,7 @@ where
                 notify.notify();
             }
         }
-        println!("ping start fail");
+
         false
     }
 
@@ -213,24 +238,55 @@ where
                     self.num_out_user_must_open += 1;
                 }
                 Ok(Async::NotReady) => self.ping_out_substream = Some(ping_dialer),
-                Err(_) => {}
+                Err(err) => println!("1 Remote ping substream errored:  {:?}", err),
             }
         }
 
         // Poll for answering pings.
-        for n in (0..self.ping_in_substreams.len()).rev() {
-            let mut ping = self.ping_in_substreams.swap_remove(n);
-            match ping.poll() {
+        self.ping_in_substreams
+            .iter_mut()
+            .for_each(|ping| match ping.poll() {
                 Ok(Async::Ready(())) => {
                     println!("accept an ping");
                 }
-                Ok(Async::NotReady) => {
-                    self.ping_in_substreams.push(ping)
+                Ok(Async::NotReady) => {}
+                Err(err) => println!("2 Remote ping substream errored:  {:?}", err),
+            });
+
+        Ok(Async::NotReady)
+    }
+
+    fn poll_custom_protocol(&mut self) -> Poll<Option<CITAOutEvent>, Error> {
+        if let Some(ref mut custom) = self.custom_protocols_substream {
+            match custom.poll() {
+                Ok(Async::NotReady) => {}
+                Ok(Async::Ready(Some(data))) => {
+                    let protocol = custom.protocol_id();
+                    return Ok(Async::Ready(Some(CITAOutEvent::CustomMessage {
+                        protocol,
+                        data,
+                    })));
                 }
-                Err(err) => println!("Remote ping substream errored:  {:?}", err),
+                Ok(Async::Ready(None)) => {
+                    // Trying to reopen the protocol.
+                    self.num_out_user_must_open += 1;
+                    return Ok(Async::Ready(Some(CITAOutEvent::CustomProtocolClosed {
+                        protocol: custom.protocol_id(),
+                        result: Ok(()),
+                    })));
+                }
+                Err(err) => {
+                    // Trying to reopen the protocol.
+                    self.queued_dial_upgrades
+                        .push(UpgradePurpose::Custom(custom.protocol_id()));
+                    self.num_out_user_must_open += 1;
+                    return Ok(Async::Ready(Some(CITAOutEvent::CustomProtocolClosed {
+                        protocol: custom.protocol_id(),
+                        result: Err(err),
+                    })));
+                }
             }
         }
-
         Ok(Async::NotReady)
     }
 }
@@ -249,11 +305,15 @@ where
         substream: Substream,
         endpoint: NodeHandlerEndpoint<Self::OutboundOpenInfo>,
     ) {
-        let config = upgrade::map(ping::protocol::Ping::default(), move |proto| {
-            FinalUpgrade::from(proto)
-        });
         match endpoint {
             NodeHandlerEndpoint::Listener => {
+                let custom_proto = CustomProtocol::new(0, &[0]);
+                let config = upgrade::or(
+                    upgrade::map(custom_proto, move |proto| FinalUpgrade::Custom(proto)),
+                    upgrade::map(ping::protocol::Ping::default(), move |proto| {
+                        FinalUpgrade::from(proto)
+                    }),
+                );
                 let upgrade = upgrade::apply(substream, config, Endpoint::Listener);
                 self.upgrades_in_progress_listen.push(Box::new(upgrade));
             }
@@ -261,9 +321,27 @@ where
                 if self.queued_dial_upgrades.is_empty() {
                     return;
                 } else {
-                    let upgrade = upgrade::apply(substream, config, Endpoint::Dialer);
-                    self.upgrades_in_progress_dial
-                        .push((self.queued_dial_upgrades.remove(0), Box::new(upgrade)));
+                    let dial = self.queued_dial_upgrades.remove(0);
+                    match dial {
+                        UpgradePurpose::Custom(id) => {
+                            let config =
+                                upgrade::map(CustomProtocol::new(id, &[0]), move |proto| {
+                                    FinalUpgrade::Custom(proto)
+                                });
+                            let upgrade = upgrade::apply(substream, config, Endpoint::Dialer);
+                            self.upgrades_in_progress_dial
+                                .push((dial, Box::new(upgrade)));
+                        }
+                        UpgradePurpose::Ping => {
+                            let config =
+                                upgrade::map(ping::protocol::Ping::default(), move |proto| {
+                                    FinalUpgrade::from(proto)
+                                });
+                            let upgrade = upgrade::apply(substream, config, Endpoint::Dialer);
+                            self.upgrades_in_progress_dial
+                                .push((dial, Box::new(upgrade) as Box<_>));
+                        }
+                    }
                 }
             }
         }
@@ -274,7 +352,7 @@ where
 
     fn inject_inbound_closed(&mut self) {}
 
-    fn inject_outbound_closed(&mut self, user_data: Self::OutboundOpenInfo) {}
+    fn inject_outbound_closed(&mut self, _user_data: Self::OutboundOpenInfo) {}
 
     fn inject_event(&mut self, event: Self::InEvent) {
         match event {
@@ -289,6 +367,9 @@ where
     }
 
     fn shutdown(&mut self) {
+        if let Some(ref mut custom) = self.custom_protocols_substream {
+            custom.shutdown();
+        }
         println!("shutdown");
     }
 
@@ -296,6 +377,11 @@ where
         &mut self,
     ) -> Poll<Option<NodeHandlerEvent<Self::OutboundOpenInfo, Self::OutEvent>>, Error> {
         match self.poll_upgrades_in_progress()? {
+            Async::Ready(value) => return Ok(Async::Ready(value.map(NodeHandlerEvent::Custom))),
+            Async::NotReady => (),
+        };
+
+        match self.poll_custom_protocol()? {
             Async::Ready(value) => return Ok(Async::Ready(value.map(NodeHandlerEvent::Custom))),
             Async::NotReady => (),
         };
