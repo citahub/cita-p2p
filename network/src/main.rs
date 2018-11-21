@@ -50,6 +50,9 @@ fn main() {
                                 CITAOutEvent::CustomMessage { protocol, data } => {
                                     println!("get back data {:?}", data);
                                 }
+                                CITAOutEvent::CustomProtocolClosed { .. } => {
+                                    return Ok(Async::NotReady);
+                                }
                                 _ => {}
                             }
                         }
@@ -128,6 +131,9 @@ fn main() {
                             protocol,
                             data: (String::from("hello too"), Vec::new()),
                         })
+                    }
+                    CITAOutEvent::CustomProtocolClosed { .. } => {
+                        return Ok(Async::NotReady);
                     }
                     _ => {}
                 }

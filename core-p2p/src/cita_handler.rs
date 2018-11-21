@@ -5,6 +5,7 @@ use libp2p::ping;
 use std::io::{Error, ErrorKind};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::timer::Delay;
 
 use crate::custom_proto::{
     cita_proto::{CitaRequest, CitaResponse},
@@ -69,7 +70,7 @@ pub struct CITANodeHandler<Substream> {
     /// Substream open for sending pings, if any.
     ping_out_substream: Option<ping::protocol::PingDialer<Substream, Instant>>,
     /// Substreams open for receiving pings.
-    ping_in_substreams: Vec<ping::protocol::PingListener<Substream>>,
+    ping_in_substreams: Option<ping::protocol::PingListener<Substream>>,
     /// Substreams being upgraded on the listening side.
     upgrades_in_progress_listen:
         Vec<Box<dyn Future<Item = FinalUpgrade<Substream>, Error = Error> + Send>>,
@@ -80,6 +81,7 @@ pub struct CITANodeHandler<Substream> {
         Box<dyn Future<Item = FinalUpgrade<Substream>, Error = Error> + Send>,
     )>,
 
+    next_ping: Delay,
     queued_dial_upgrades: Vec<UpgradePurpose>,
 
     num_out_user_must_open: usize,
@@ -92,15 +94,16 @@ where
     Substream: AsyncRead + AsyncWrite + Send + 'static,
 {
     pub fn new() -> Self {
-        let queued_dial_upgrades = vec![UpgradePurpose::Ping, UpgradePurpose::Custom(0)];
+        let queued_dial_upgrades = vec![UpgradePurpose::Custom(0)];
         CITANodeHandler {
             custom_protocols_substream: None,
             ping_out_substream: None,
-            ping_in_substreams: Vec::with_capacity(1),
+            ping_in_substreams: None,
             upgrades_in_progress_listen: Vec::with_capacity(1),
             upgrades_in_progress_dial: Vec::with_capacity(1),
+            next_ping: Delay::new(Instant::now() + Duration::from_secs(10)),
             queued_dial_upgrades,
-            num_out_user_must_open: 2,
+            num_out_user_must_open: 1,
             notify: None,
         }
     }
@@ -129,7 +132,7 @@ where
                 }
             }
             FinalUpgrade::PingListener(ping_listener) => {
-                self.ping_in_substreams.push(ping_listener);
+                self.ping_in_substreams = Some(ping_listener);
                 None
             }
             FinalUpgrade::Custom(proto) => {
@@ -225,10 +228,38 @@ where
     }
 
     fn poll_ping(&mut self) -> Poll<Option<CITAOutEvent>, Error> {
+        // Interval ping remote
+        match self.next_ping.poll() {
+            Ok(Async::NotReady) => {}
+            Ok(Async::Ready(())) => {
+                self.next_ping
+                    .reset(Instant::now() + Duration::from_secs(10));
+                if self.ping_remote() {
+                    return Ok(Async::Ready(Some(CITAOutEvent::PingStart)));
+                }
+            }
+            Err(err) => {
+                return Err(Error::new(ErrorKind::Other, err));
+            }
+        }
+
+        // Poll for answering pings.
+        if let Some(mut ping) = self.ping_in_substreams.take() {
+            match ping.poll() {
+                Ok(Async::Ready(())) => {
+                    println!("accept an ping");
+                }
+                Ok(Async::NotReady) => self.ping_in_substreams = Some(ping),
+                Err(err) => println!("2 Remote ping substream errored:  {:?}", err),
+            }
+        }
+
         // Poll the ping substream.
         if let Some(mut ping_dialer) = self.ping_out_substream.take() {
             match ping_dialer.poll() {
                 Ok(Async::Ready(Some(started))) => {
+                    self.next_ping
+                        .reset(Instant::now() + Duration::from_secs(10));
                     return Ok(Async::Ready(Some(CITAOutEvent::PingSuccess(
                         started.elapsed(),
                     ))));
@@ -241,17 +272,6 @@ where
                 Err(err) => println!("1 Remote ping substream errored:  {:?}", err),
             }
         }
-
-        // Poll for answering pings.
-        self.ping_in_substreams
-            .iter_mut()
-            .for_each(|ping| match ping.poll() {
-                Ok(Async::Ready(())) => {
-                    println!("accept an ping");
-                }
-                Ok(Async::NotReady) => {}
-                Err(err) => println!("2 Remote ping substream errored:  {:?}", err),
-            });
 
         Ok(Async::NotReady)
     }
