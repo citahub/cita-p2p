@@ -12,6 +12,8 @@ use core_p2p::{
 };
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use futures::prelude::*;
+use futures::sync::mpsc::{unbounded as future_unbounded, UnboundedReceiver, UnboundedSender};
+use std::io::{Error, ErrorKind};
 use std::thread;
 
 enum Task {
@@ -21,7 +23,7 @@ enum Task {
 }
 
 struct Process {
-    task_receiver: Receiver<Task>,
+    task_receiver: UnboundedReceiver<Task>,
     event_sender: Sender<ServiceEvent>,
     new_dialer: Vec<Multiaddr>,
     new_listen: Vec<Multiaddr>,
@@ -29,8 +31,8 @@ struct Process {
 }
 
 impl Process {
-    pub fn new() -> (Self, Sender<Task>, Receiver<ServiceEvent>) {
-        let (task_sender, task_receiver) = unbounded();
+    pub fn new() -> (Self, UnboundedSender<Task>, Receiver<ServiceEvent>) {
+        let (task_sender, task_receiver) = future_unbounded();
         let (event_sender, event_receiver) = unbounded();
 
         (
@@ -45,22 +47,33 @@ impl Process {
             event_receiver,
         )
     }
-    pub fn receive_task(&mut self) {
-        while let Ok(task) = self.task_receiver.try_recv() {
-            match task {
-                Task::Dial(address) => self.new_dialer.push(address),
-                Task::Listen(address) => self.new_listen.push(address),
-                Task::Messages(messages) => self.messages_buffer.extend(messages),
+}
+
+impl Stream for Process {
+    type Item = ();
+    type Error = Error;
+
+    fn poll(&mut self) -> Poll<Option<()>, Error> {
+        match self
+            .task_receiver
+            .poll()
+            .map_err(|_| Error::new(ErrorKind::Other, ""))?
+        {
+            Async::Ready(Some(task)) => {
+                match task {
+                    Task::Dial(address) => self.new_dialer.push(address),
+                    Task::Listen(address) => self.new_listen.push(address),
+                    Task::Messages(messages) => self.messages_buffer.extend(messages),
+                }
+                return Ok(Async::Ready(Some(())));
             }
+            Async::Ready(None) => return Ok(Async::Ready(None)),
+            Async::NotReady => return Ok(Async::NotReady),
         }
     }
 }
 
 impl ServiceHandle for Process {
-    fn before_poll(&mut self) {
-        self.receive_task()
-    }
-
     fn out_event(&self, event: Option<ServiceEvent>) {
         if let Some(event) = event {
             self.event_sender.send(event).unwrap();
@@ -103,7 +116,7 @@ fn main() {
                         match event {
                             ServiceEvent::CustomMessage {id, data, ..} => {
                                 println!("{:?}, {:?}", id, data);
-                                let _ = task_sender.send(Task::Messages(vec![(None, 0, (String::from("hello too"), Vec::new()))]));
+                                let _ = task_sender.unbounded_send(Task::Messages(vec![(None, 0, (String::from("hello too"), Vec::new()))]));
                             }
                             _ => {}
                         }
@@ -116,7 +129,7 @@ fn main() {
                     Ok(event) => println!("1 {:?}", event),
                     Err(_) => {}
                 }
-                let _ = task_sender_1.send(Task::Messages(vec![(None, 0, (String::from("hello"), Vec::new()))]));
+                let _ = task_sender_1.unbounded_send(Task::Messages(vec![(None, 0, (String::from("hello"), Vec::new()))]));
             }
         )
     }

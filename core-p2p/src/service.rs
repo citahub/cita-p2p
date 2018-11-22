@@ -38,9 +38,7 @@ pub enum ServiceEvent {
     },
 }
 
-pub trait ServiceHandle: Sync + Send {
-    /// Hook before poll
-    fn before_poll(&mut self);
+pub trait ServiceHandle: Sync + Send + Stream<Item = (), Error = Error> {
     /// Send service event to out
     fn out_event(&self, event: Option<ServiceEvent>);
     /// Dialing a new address
@@ -220,7 +218,8 @@ where
             }
             Async::NotReady => (),
         }
-        self.service_handle.before_poll();
+
+        let _ = self.service_handle.poll();
         if let Some(address) = self.service_handle.new_dialer() {
             if let Err(address) = self.swarm.dial(address, CITANodeHandler::new()) {
                 self.need_connect.push(address);
