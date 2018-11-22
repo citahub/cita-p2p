@@ -7,3 +7,4 @@ authors = ["piaoliu <441594700@qq.com>"]
 core-p2p = { path = "../core-p2p" }
 futures = "0.1"
 tokio = "0.1"
+crossbeam-channel= "0.3.2"

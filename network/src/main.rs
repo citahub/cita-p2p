@@ -1,147 +1,123 @@
 extern crate core_p2p;
 extern crate futures;
 extern crate tokio;
+#[macro_use]
+extern crate crossbeam_channel;
 
 use core_p2p::{
-    build_swarm, secio, CITAInEvent, CITANodeHandler, CITAOutEvent, PeerId, RawSwarmEvent,
+    custom_proto::cita_proto::CitaRequest,
+    secio,
+    service::{build_service, ServiceEvent, ServiceHandle},
+    Multiaddr, PeerId,
 };
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use futures::prelude::*;
 use std::thread;
 
+enum Task {
+    Dial(Multiaddr),
+    Listen(Multiaddr),
+    Messages(Vec<(Option<PeerId>, usize, CitaRequest)>),
+}
+
+struct Process {
+    task_receiver: Receiver<Task>,
+    event_sender: Sender<ServiceEvent>,
+    new_dialer: Vec<Multiaddr>,
+    new_listen: Vec<Multiaddr>,
+    messages_buffer: Vec<(Option<PeerId>, usize, CitaRequest)>,
+}
+
+impl Process {
+    pub fn new() -> (Self, Sender<Task>, Receiver<ServiceEvent>) {
+        let (task_sender, task_receiver) = unbounded();
+        let (event_sender, event_receiver) = unbounded();
+
+        (
+            Process {
+                task_receiver,
+                event_sender,
+                new_dialer: Vec::new(),
+                new_listen: Vec::new(),
+                messages_buffer: Vec::new(),
+            },
+            task_sender,
+            event_receiver,
+        )
+    }
+    pub fn receive_task(&mut self) {
+        while let Ok(task) = self.task_receiver.try_recv() {
+            match task {
+                Task::Dial(address) => self.new_dialer.push(address),
+                Task::Listen(address) => self.new_listen.push(address),
+                Task::Messages(messages) => self.messages_buffer.extend(messages),
+            }
+        }
+    }
+}
+
+impl ServiceHandle for Process {
+    fn before_poll(&mut self) {
+        self.receive_task()
+    }
+
+    fn out_event(&self, event: Option<ServiceEvent>) {
+        if let Some(event) = event {
+            self.event_sender.send(event).unwrap();
+        }
+    }
+
+    fn new_dialer(&mut self) -> Option<Multiaddr> {
+        self.new_dialer.pop()
+    }
+
+    fn new_listen(&mut self) -> Option<Multiaddr> {
+        self.new_listen.pop()
+    }
+
+    fn send_message(&mut self) -> Vec<(Option<PeerId>, usize, CitaRequest)> {
+        self.messages_buffer.drain(..).collect()
+    }
+}
+
 fn main() {
     let key_pair = secio::SecioKeyPair::secp256k1_generated().unwrap();
-    let mut swarm = build_swarm(key_pair);
-    match swarm.listen_on("/ip4/127.0.0.1/tcp/1337".parse().unwrap()) {
-        Ok(addr) => println!("success {}", addr),
-        Err(addr) => println!("fail {}", addr),
-    }
-    let _ = swarm.dial(
-        "/ip4/127.0.0.1/tcp/1338".parse().unwrap(),
-        CITANodeHandler::new(),
-    );
+    let (service_handle, task_sender, event_receiver) = Process::new();
+    let mut service = build_service(key_pair, service_handle);
+    let _ = service.listen_on("/ip4/127.0.0.1/tcp/1337".parse().unwrap());
 
-    thread::spawn(move || {
-        let key_pair = secio::SecioKeyPair::secp256k1_generated().unwrap();
-        let mut swarm = build_swarm(key_pair);
-        let _ = swarm.listen_on("/ip4/127.0.0.1/tcp/1338".parse().unwrap());
-        if let Ok(_) = swarm.dial(
-            "/ip4/127.0.0.1/tcp/1337".parse().unwrap(),
-            CITANodeHandler::new(),
-        ) {
-            println!("dial true");
-        };
-        tokio::run(
-            futures::stream::poll_fn(move || -> Poll<Option<()>, ()> {
-                loop {
-                    match swarm.poll() {
-                        Async::Ready(RawSwarmEvent::Connected { peer_id, endpoint }) => {
-                            println!("client connected {:?}", peer_id);
-                        }
-                        Async::Ready(RawSwarmEvent::NodeEvent { peer_id, event }) => {
-                            println!("{:?}, {:?}", peer_id, event);
-                            match event {
-                                CITAOutEvent::CustomProtocolOpen { protocol, version } => {
-                                    println!("send data");
-                                    swarm.broadcast_event(&CITAInEvent::SendCustomMessage {
-                                        protocol,
-                                        data: (String::from("hello"), Vec::new()),
-                                    })
-                                }
-                                CITAOutEvent::CustomMessage { protocol, data } => {
-                                    println!("get back data {:?}", data);
-                                }
-                                CITAOutEvent::CustomProtocolClosed { .. } => {
-                                    return Ok(Async::NotReady);
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => continue,
-                    }
-                }
-            }).for_each(|_| Ok(())),
-        );
-    });
+    thread::spawn(move || tokio::run(service.map_err(|_| ()).for_each(|_| Ok(()))));
 
-    tokio::run(
-        futures::stream::poll_fn(move || -> Poll<Option<PeerId>, std::io::Error> {
-            loop {
-                let (peer_id, event) = match swarm.poll() {
-                    Async::Ready(RawSwarmEvent::Connected { peer_id, endpoint }) => {
-                        println!("sever connected {:?}", peer_id);
-                        continue;
-                    }
-                    Async::Ready(RawSwarmEvent::IncomingConnection(incoming)) => {
-                        println!("{}, {}", incoming.send_back_addr(), incoming.listen_addr());
-                        incoming.accept(CITANodeHandler::new());
-                        continue;
-                    }
-                    Async::Ready(RawSwarmEvent::NodeClosed { peer_id, .. }) => {
-                        println!("close {:?}", peer_id);
-                        return Ok(Async::NotReady);
-                    }
-                    Async::Ready(RawSwarmEvent::DialError {
-                        multiaddr, error, ..
-                    }) => {
-                        println!("{:?}", multiaddr);
-                        return Ok(Async::NotReady);
-                    }
-                    Async::Ready(RawSwarmEvent::UnknownPeerDialError {
-                        multiaddr, error, ..
-                    }) => {
-                        println!("{:?}, unknown", multiaddr);
-                        return Ok(Async::NotReady);
-                    }
-                    Async::Ready(RawSwarmEvent::IncomingConnectionError {
-                        listen_addr,
-                        send_back_addr,
-                        error,
-                    }) => {
-                        println!("incoming error: {}", error);
-                        continue;
-                    }
-                    Async::NotReady => return Ok(Async::NotReady),
-                    Async::Ready(RawSwarmEvent::Replaced {
-                        peer_id, endpoint, ..
-                    }) => {
-                        println!("{:?} replaced", peer_id);
-                        continue;
-                    }
-                    Async::Ready(RawSwarmEvent::NodeError { peer_id, error, .. }) => {
-                        println!("{:?} error: {}", peer_id, error);
-                        continue;
-                    }
-                    Async::Ready(RawSwarmEvent::ListenerClosed {
-                        listen_addr,
-                        result,
-                        ..
-                    }) => {
-                        println!("{} listen closed", listen_addr);
-                        continue;
-                    }
-                    Async::Ready(RawSwarmEvent::NodeEvent { peer_id, event }) => {
-                        println!("{:?}, {:?}", peer_id, event);
-                        (peer_id, event)
-                    }
-                };
+    let key_pair = secio::SecioKeyPair::secp256k1_generated().unwrap();
+    let (service_handle, task_sender_1, event_receiver_1) = Process::new();
+    let mut service = build_service(key_pair, service_handle);
+    let _ = service.dial("/ip4/127.0.0.1/tcp/1337".parse().unwrap());
+
+    thread::spawn(move || tokio::run(service.map_err(|_| ()).for_each(|_| Ok(()))));
+
+    loop {
+        select!(
+            recv(event_receiver) -> event => {
                 match event {
-                    CITAOutEvent::CustomMessage { protocol, data } => {
-                        println!("get data {:?}", data);
-                        swarm.broadcast_event(&CITAInEvent::SendCustomMessage {
-                            protocol,
-                            data: (String::from("hello too"), Vec::new()),
-                        })
+                    Ok(event) => {
+                        match event {
+                            ServiceEvent::CustomMessage {id, data, ..} => {
+                                println!("{:?}, {:?}", id, data);
+                                let _ = task_sender.send(Task::Messages(vec![(None, 0, (String::from("hello too"), Vec::new()))]));
+                            }
+                            _ => {}
+                        }
                     }
-                    CITAOutEvent::CustomProtocolClosed { .. } => {
-                        return Ok(Async::NotReady);
-                    }
-                    _ => {}
+                    Err(_) => {}
                 }
             }
-        }).map_err(|_| ())
-        .for_each(|_id| {
-            println!("accept one link");
-            Ok(())
-        }),
-    )
+            recv(event_receiver_1) -> event => {
+                match event {
+                    Ok(event) => println!("1 {:?}", event),
+                    Err(_) => {}
+                }
+                let _ = task_sender_1.send(Task::Messages(vec![(None, 0, (String::from("hello"), Vec::new()))]));
+            }
+        )
+    }
 }
