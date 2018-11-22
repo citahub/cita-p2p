@@ -167,7 +167,6 @@ where
             if let Some(notify) = self.notify.take() {
                 notify.notify();
             }
-            println!("ping start");
             return true;
         }
         // Otherwise, ensure we have an upgrade for a ping substream in queue.
@@ -246,9 +245,7 @@ where
         // Poll for answering pings.
         if let Some(mut ping) = self.ping_in_substreams.take() {
             match ping.poll() {
-                Ok(Async::Ready(())) => {
-                    println!("accept an ping");
-                }
+                Ok(Async::Ready(())) => {}
                 Ok(Async::NotReady) => self.ping_in_substreams = Some(ping),
                 Err(err) => println!("2 Remote ping substream errored:  {:?}", err),
             }
