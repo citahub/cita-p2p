@@ -1,5 +1,5 @@
 use cita_handler::{CITAInEvent, CITANodeHandler, CITAOutEvent};
-use custom_proto::cita_proto::{CitaRequest, CitaResponse};
+use custom_proto::p2p_proto::{Request, Response};
 use futures::prelude::*;
 use libp2p::core::{
     either,
@@ -34,7 +34,7 @@ pub enum ServiceEvent {
     CustomMessage {
         id: PeerId,
         protocol: usize,
-        data: CitaResponse,
+        data: Response,
     },
 }
 
@@ -46,7 +46,7 @@ pub trait ServiceHandle: Sync + Send + Stream<Item = (), Error = Error> {
     /// Listening a new address
     fn new_listen(&mut self) -> Option<Multiaddr>;
     /// Send message to specified node
-    fn send_message(&mut self) -> Vec<(Option<PeerId>, usize, CitaRequest)>;
+    fn send_message(&mut self) -> Vec<(Option<PeerId>, usize, Request)>;
 }
 
 pub struct Service<Handle> {
@@ -75,7 +75,7 @@ where
     Handle: ServiceHandle,
 {
     /// Send message to specified node
-    pub fn send_custom_message(&mut self, node: PeerId, protocol: usize, data: CitaRequest) {
+    pub fn send_custom_message(&mut self, node: PeerId, protocol: usize, data: Request) {
         if let Some(mut connected) = self.swarm.peer(node.clone()).as_connected() {
             connected.send_event(CITAInEvent::SendCustomMessage { protocol, data });
         } else {
@@ -84,7 +84,7 @@ where
     }
 
     /// Send message to all node
-    pub fn broadcast(&mut self, protocol: usize, data: CitaRequest) {
+    pub fn broadcast(&mut self, protocol: usize, data: Request) {
         self.swarm
             .broadcast_event(&CITAInEvent::SendCustomMessage { protocol, data });
     }

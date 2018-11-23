@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use crate::custom_proto::cita_proto::{CitaCodec, CitaRequest, CitaResponse};
+use crate::custom_proto::p2p_proto::{Codec, Request, Response};
 use futures::{self, prelude::*, stream, task};
 use libp2p::core::{ConnectionUpgrade, Endpoint};
 use std::{collections::VecDeque, vec::IntoIter};
@@ -38,11 +38,11 @@ impl CustomProtocol {
 pub struct CustomProtocolSubstream<Substream> {
     is_closing: bool,
     /// Buffer to send
-    send_queue: VecDeque<CitaRequest>,
+    send_queue: VecDeque<Request>,
     /// if true, we should call `poll_complete`
     requires_poll_complete: bool,
     /// The underlying substream
-    inner: stream::Fuse<Framed<Substream, CitaCodec>>,
+    inner: stream::Fuse<Framed<Substream, Codec>>,
     protocol_id: usize,
     protocol_version: u8,
     /// Task to notify when something is changed and must to be polled.
@@ -67,7 +67,7 @@ impl<Substream> CustomProtocolSubstream<Substream> {
         }
     }
 
-    pub fn send_message(&mut self, data: CitaRequest) {
+    pub fn send_message(&mut self, data: Request) {
         self.send_queue.push_back(data);
 
         if let Some(task) = self.notify.take() {
@@ -80,7 +80,7 @@ impl<Substream> Stream for CustomProtocolSubstream<Substream>
 where
     Substream: AsyncRead + AsyncWrite,
 {
-    type Item = CitaResponse;
+    type Item = Response;
     type Error = ::std::io::Error;
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
@@ -159,7 +159,7 @@ where
         protocol_version: Self::UpgradeIdentifier,
         _endpoint: Endpoint,
     ) -> Self::Future {
-        let framed = CitaCodec.framed(socket);
+        let framed = Codec.framed(socket);
 
         futures::future::ok(CustomProtocolSubstream {
             is_closing: false,

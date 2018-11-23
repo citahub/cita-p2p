@@ -1,2 +1,2 @@
-pub mod cita_proto;
+pub mod p2p_proto;
 pub mod custom_proto;

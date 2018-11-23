@@ -8,14 +8,14 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::timer::Delay;
 
 use crate::custom_proto::{
-    cita_proto::{CitaRequest, CitaResponse},
+    p2p_proto::{Request, Response},
     custom_proto::{CustomProtocol, CustomProtocolSubstream},
 };
 
 #[derive(Debug, Clone)]
 pub enum CITAInEvent {
     Accept,
-    SendCustomMessage { protocol: usize, data: CitaRequest },
+    SendCustomMessage { protocol: usize, data: Request },
     Ping,
 }
 #[derive(Debug)]
@@ -31,7 +31,7 @@ pub enum CITAOutEvent {
     },
     CustomMessage {
         protocol: usize,
-        data: CitaResponse,
+        data: Response,
     },
     PingStart,
     PingSuccess(Duration),
@@ -108,7 +108,7 @@ where
         }
     }
 
-    fn send_custom_message(&mut self, _protocol: usize, data: CitaRequest) {
+    fn send_custom_message(&mut self, _protocol: usize, data: Request) {
         if let Some(ref mut custom) = self.custom_protocols_substream {
             custom.send_message(data);
         }

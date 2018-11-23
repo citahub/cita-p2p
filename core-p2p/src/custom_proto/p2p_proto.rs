@@ -2,14 +2,13 @@ use byteorder::{ByteOrder, NetworkEndian};
 use bytes::BufMut;
 use bytes::BytesMut;
 use std::io;
-use std::str;
 use tokio::codec::{Decoder, Encoder};
 
-pub type CitaRequest = (String, Vec<u8>);
-pub type CitaResponse = Option<(String, Vec<u8>)>;
+pub type Request = Vec<u8>;
+pub type Response = Option<Vec<u8>>;
 
 /// Our multiplexed line-based codec
-pub struct CitaCodec;
+pub struct Codec;
 
 /// Implementation of the multiplexed line-based protocol.
 ///
@@ -24,9 +23,6 @@ pub struct CitaCodec;
 /// +------------------------+--------------------------+
 /// | Symbol for Start       | \xDEADBEEF               |
 /// | Length of Full Payload | u32                      |
-/// +------------------------+--------------------------+
-/// | Length of Key          | u8                       |
-/// | Key                    | bytes of a str           |
 /// +------------------------+--------------------------+
 /// | Message                | a serialize data         |
 /// +------------------------+--------------------------+
@@ -43,8 +39,8 @@ fn opt_bytes_extend(buf: &mut BytesMut, data: &[u8]) {
     }
 }
 
-impl Decoder for CitaCodec {
-    type Item = CitaRequest;
+impl Decoder for Codec {
+    type Item = Request;
     type Error = io::Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, io::Error> {
@@ -52,8 +48,8 @@ impl Decoder for CitaCodec {
     }
 }
 
-impl Encoder for CitaCodec {
-    type Item = CitaResponse;
+impl Encoder for Codec {
+    type Item = Response;
     type Error = io::Error;
 
     fn encode(&mut self, msg: Self::Item, buf: &mut BytesMut) -> io::Result<()> {
@@ -62,17 +58,11 @@ impl Encoder for CitaCodec {
     }
 }
 
-pub fn pubsub_message_to_network_message(buf: &mut BytesMut, msg: Option<(String, Vec<u8>)>) {
+pub fn pubsub_message_to_network_message(buf: &mut BytesMut, msg: Option<Vec<u8>>) {
     let mut request_id_bytes = [0; 8];
-    if let Some((key, body)) = msg {
-        let length_key = key.len();
-        // Use 1 byte to store key length.
-        if length_key > u8::max_value() as usize {
-            //            error!("The MQ message key is too long {}.", key);
-            return;
-        }
-        // Use 1 bytes to store the length for key, then store key, the last part is body.
-        let length_full = 1 + length_key + body.len();
+
+    if let Some(body) = msg {
+        let length_full = body.len();
         if length_full > u32::max_value() as usize {
             //            error!(
             //                "The MQ message with key {} is too long {}.",
@@ -84,8 +74,6 @@ pub fn pubsub_message_to_network_message(buf: &mut BytesMut, msg: Option<(String
         let request_id = NETMSG_START + length_full as u64;
         NetworkEndian::write_u64(&mut request_id_bytes, request_id);
         opt_bytes_extend(buf, &request_id_bytes);
-        buf.put_u8(length_key as u8);
-        opt_bytes_extend(buf, key.as_bytes());
         opt_bytes_extend(buf, &body);
     } else {
         let request_id = NETMSG_START;
@@ -94,7 +82,7 @@ pub fn pubsub_message_to_network_message(buf: &mut BytesMut, msg: Option<(String
     }
 }
 
-pub fn network_message_to_pubsub_message(buf: &mut BytesMut) -> Option<(String, Vec<u8>)> {
+pub fn network_message_to_pubsub_message(buf: &mut BytesMut) -> Option<Vec<u8>> {
     if buf.len() < 8 {
         return None;
     }
@@ -105,41 +93,19 @@ pub fn network_message_to_pubsub_message(buf: &mut BytesMut) -> Option<(String, 
     if netmsg_start != NETMSG_START {
         return None;
     }
-    if length_full + 8 > buf.len() {
-        return None;
-    }
-    let _request_id_buf = buf.split_to(8);
 
     if length_full == 0 {
         return None;
     }
-    let mut payload_buf = buf.split_to(length_full);
 
-    let length_key = payload_buf[0] as usize;
-    let _length_key_buf = payload_buf.split_to(1);
-    if length_key == 0 {
-        //        error!("network message key is empty.");
+    if length_full + 8 > buf.len() {
         return None;
     }
-    if length_key > payload_buf.len() {
-        //        error!(
-        //            "Buffer is not enough for key {} > {}.",
-        //            length_key,
-        //            buf.len()
-        //        );
-        return None;
-    }
-    let key_buf = payload_buf.split_to(length_key);
-    let key_str_result = str::from_utf8(&key_buf);
-    if key_str_result.is_err() {
-        //        error!("network message parse key error {:?}.", key_buf);
-        return None;
-    }
-    let key = key_str_result.unwrap().to_string();
-    if length_full == 1 + length_key {
-        //        warn!("network message is empty.");
-    }
-    Some((key, payload_buf.to_vec()))
+
+    let _ = buf.split_to(8);
+    let payload_buf = buf.split_to(length_full);
+
+    Some(payload_buf.to_vec())
 }
 
 #[cfg(test)]
@@ -157,14 +123,12 @@ mod test {
 
     #[test]
     fn convert_messages() {
-        let key = "this-is-the-key".to_string();
         let msg: Vec<u8> = vec![1, 3, 5, 7, 9];
-        let mut buf = BytesMut::with_capacity(4 + 4 + 1 + key.len() + msg.len());
-        pubsub_message_to_network_message(&mut buf, Some((key.clone(), msg.clone())));
+        let mut buf = BytesMut::with_capacity(4 + 4 + msg.len());
+        pubsub_message_to_network_message(&mut buf, Some(msg.clone()));
         let pub_msg_opt = network_message_to_pubsub_message(&mut buf);
         assert!(pub_msg_opt.is_some());
-        let (key_new, msg_new) = pub_msg_opt.unwrap();
-        assert_eq!(key, key_new);
+        let msg_new = pub_msg_opt.unwrap();
         assert_eq!(msg, msg_new);
     }
 }
