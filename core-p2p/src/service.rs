@@ -1,5 +1,5 @@
-use cita_handler::{CITAInEvent, CITANodeHandler, CITAOutEvent};
-use custom_proto::p2p_proto::{Request, Response};
+use cita_handler::{CITAInEvent, CITANodeHandler, CITAOutEvent, IdentificationRequest};
+use custom_proto::encode_decode::{Request, Response};
 use futures::prelude::*;
 use libp2p::core::{
     either,
@@ -8,13 +8,21 @@ use libp2p::core::{
     nodes::raw_swarm::{ConnectedPoint, RawSwarm, RawSwarmEvent},
     nodes::Substream,
     transport::boxed::Boxed,
-    upgrade, Endpoint, Multiaddr, PeerId, Transport,
+    upgrade, Endpoint, Multiaddr, PeerId, PublicKey, Transport,
 };
 use libp2p::{mplex, secio, yamux, TransportTimeout};
 use std::collections::HashMap;
 use std::io::Error;
 use std::time::Duration;
 use std::usize;
+use tokio::io::{AsyncRead, AsyncWrite};
+
+type P2PRawSwarm = RawSwarm<
+    Boxed<(PeerId, StreamMuxerBox)>,
+    CITAInEvent,
+    CITAOutEvent<Substream<StreamMuxerBox>>,
+    CITANodeHandler<Substream<StreamMuxerBox>>,
+>;
 
 #[derive(Debug)]
 pub enum ServiceEvent {
@@ -36,26 +44,38 @@ pub enum ServiceEvent {
         protocol: usize,
         data: Response,
     },
+    NodeInfo {
+        id: PeerId,
+        listen_address: Vec<Multiaddr>,
+    },
 }
 
-pub trait ServiceHandle: Sync + Send + Stream<Item = (), Error = Error> {
+/// Service hook
+pub trait ServiceHandle: Sync + Send + Stream<Item = (), Error = ()> {
     /// Send service event to out
     fn out_event(&self, event: Option<ServiceEvent>);
     /// Dialing a new address
-    fn new_dialer(&mut self) -> Option<Multiaddr>;
+    fn new_dialer(&mut self) -> Option<Multiaddr> {
+        None
+    }
     /// Listening a new address
-    fn new_listen(&mut self) -> Option<Multiaddr>;
+    fn new_listen(&mut self) -> Option<Multiaddr> {
+        None
+    }
+    /// Disconnect a peer
+    fn disconnect(&mut self) -> Option<PeerId> {
+        None
+    }
     /// Send message to specified node
-    fn send_message(&mut self) -> Vec<(Option<PeerId>, usize, Request)>;
+    fn send_message(&mut self) -> Vec<(Option<PeerId>, usize, Request)> {
+        Vec::new()
+    }
 }
 
+/// Encapsulation of raw_swarm, providing external interfaces
 pub struct Service<Handle> {
-    swarm: RawSwarm<
-        Boxed<(PeerId, StreamMuxerBox)>,
-        CITAInEvent,
-        CITAOutEvent,
-        CITANodeHandler<Substream<StreamMuxerBox>>,
-    >,
+    swarm: P2PRawSwarm,
+    local_public_key: PublicKey,
     local_peer_id: PeerId,
     listening_address: Vec<Multiaddr>,
     /// Connected node information
@@ -64,8 +84,8 @@ pub struct Service<Handle> {
     service_handle: Handle,
 }
 
-#[derive(Clone)]
-struct NodeInfo {
+#[derive(Clone, Debug)]
+pub struct NodeInfo {
     endpoint: Endpoint,
     address: Multiaddr,
 }
@@ -75,11 +95,11 @@ where
     Handle: ServiceHandle,
 {
     /// Send message to specified node
-    pub fn send_custom_message(&mut self, node: PeerId, protocol: usize, data: Request) {
+    pub fn send_custom_message(&mut self, node: &PeerId, protocol: usize, data: Request) {
         if let Some(mut connected) = self.swarm.peer(node.clone()).as_connected() {
             connected.send_event(CITAInEvent::SendCustomMessage { protocol, data });
         } else {
-            println!("Try to send message to {:?}, but not connected", node);
+            debug!("Try to send message to {:?}, but not connected", node);
         }
     }
 
@@ -107,9 +127,130 @@ where
         self.swarm.dial(addr, CITANodeHandler::new())
     }
 
+    /// Disconnect a peer
+    #[inline]
+    pub fn drop_node(&mut self, id: PeerId) {
+        self.connected_nodes.remove(&id);
+        if let Some(connected) = self.swarm.peer(id).as_connected() {
+            connected.close();
+        }
+    }
+
+    /// Service handle process
+    #[inline]
+    fn handle_hook(&mut self) {
+        while let Some(address) = self.service_handle.new_dialer() {
+            if let Err(address) = self.swarm.dial(address, CITANodeHandler::new()) {
+                self.need_connect.push(address);
+            }
+        }
+        while let Some(address) = self.service_handle.new_listen() {
+            if let Ok(address) = self.swarm.listen_on(address) {
+                self.listening_address.push(address);
+            }
+        }
+        while let Some(id) = self.service_handle.disconnect() {
+            self.drop_node(id);
+        }
+        self.service_handle
+            .send_message()
+            .into_iter()
+            .for_each(|(id, protocol, data)| match id {
+                Some(id) => self.send_custom_message(&id, protocol, data),
+                None => self.broadcast(protocol, data),
+            });
+    }
+
+    /// Identify respond
+    fn respond_to_identify_request<Substream>(
+        &mut self,
+        requester: &PeerId,
+        responder: IdentificationRequest<Substream>,
+    ) where
+        Substream: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        if let Some(info) = self.connected_nodes.get(&requester) {
+            responder.respond(
+                self.local_public_key.clone(),
+                self.listening_address.clone(),
+                &info.address,
+            )
+        }
+    }
+
+    fn add_observed_addr(&mut self, address: &Multiaddr) {
+        for mut addr in self.swarm.nat_traversal(&address) {
+            // Ignore addresses we already know about.
+            if self.listening_address.iter().any(|a| a == &addr) {
+                continue;
+            }
+
+            self.listening_address.push(addr.clone());
+            addr.append(Protocol::P2p(self.local_peer_id.clone().into()));
+        }
+    }
+
+    /// All Custom Event to throw process
+    fn event_handle<Substream>(
+        &mut self,
+        peer_id: PeerId,
+        event: CITAOutEvent<Substream>,
+    ) -> Option<ServiceEvent>
+    where
+        Substream: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        match event {
+            CITAOutEvent::CustomProtocolOpen { protocol, version } => {
+                Some(ServiceEvent::CustomProtocolOpen {
+                    id: peer_id,
+                    protocol,
+                    version,
+                })
+            }
+            CITAOutEvent::CustomMessage { protocol, data } => Some(ServiceEvent::CustomMessage {
+                id: peer_id,
+                protocol,
+                data,
+            }),
+            CITAOutEvent::CustomProtocolClosed { protocol, .. } => {
+                Some(ServiceEvent::CustomProtocolClosed {
+                    id: peer_id,
+                    protocol,
+                })
+            }
+            CITAOutEvent::Useless => {
+                self.connected_nodes.remove(&peer_id);
+                Some(ServiceEvent::NodeClosed { id: peer_id })
+            }
+            CITAOutEvent::PingStart => {
+                debug!("ping start");
+                None
+            }
+            CITAOutEvent::PingSuccess(time) => {
+                debug!("ping success on {:?}", time);
+                None
+            }
+            CITAOutEvent::IdentificationRequest(request) => {
+                self.respond_to_identify_request(&peer_id, request);
+                None
+            }
+            CITAOutEvent::Identified {
+                info,
+                observed_addr,
+            } => {
+                self.add_observed_addr(&observed_addr);
+                Some(ServiceEvent::NodeInfo {
+                    id: peer_id,
+                    listen_address: info.listen_addrs,
+                })
+            }
+        }
+    }
+
+    /// Poll raw swarm, throw corresponding event
     fn poll_swarm(&mut self) -> Poll<Option<ServiceEvent>, Error> {
         loop {
-            match self.swarm.poll() {
+            let (id, event) = match self.swarm.poll() {
                 Async::Ready(event) => match event {
                     RawSwarmEvent::Connected { peer_id, endpoint } => {
                         let (address, endpoint) = match endpoint {
@@ -120,45 +261,15 @@ where
                         };
                         self.connected_nodes
                             .insert(peer_id, NodeInfo { address, endpoint });
+                        continue;
                     }
-                    RawSwarmEvent::NodeEvent { peer_id, event } => match event {
-                        CITAOutEvent::CustomProtocolOpen { protocol, version } => {
-                            return Ok(Async::Ready(Some(ServiceEvent::CustomProtocolOpen {
-                                id: peer_id,
-                                protocol,
-                                version,
-                            })))
-                        }
-                        CITAOutEvent::CustomMessage { protocol, data } => {
-                            return Ok(Async::Ready(Some(ServiceEvent::CustomMessage {
-                                id: peer_id,
-                                protocol,
-                                data,
-                            })))
-                        }
-                        CITAOutEvent::CustomProtocolClosed { protocol, .. } => {
-                            return Ok(Async::Ready(Some(ServiceEvent::CustomProtocolClosed {
-                                id: peer_id,
-                                protocol,
-                            })))
-                        }
-                        CITAOutEvent::Unresponsive => {
-                            self.connected_nodes.remove(&peer_id);
-                            return Ok(Async::Ready(Some(ServiceEvent::NodeClosed { id: peer_id })));
-                        }
-                        CITAOutEvent::PingStart => {
-                            println!("ping start");
-                        }
-                        CITAOutEvent::PingSuccess(time) => {
-                            println!("ping success on {:?}", time);
-                        }
-                    },
+                    RawSwarmEvent::NodeEvent { peer_id, event } => (peer_id, event),
                     RawSwarmEvent::NodeClosed { peer_id, .. } => {
                         self.connected_nodes.remove(&peer_id);
                         return Ok(Async::Ready(Some(ServiceEvent::NodeClosed { id: peer_id })));
                     }
                     RawSwarmEvent::NodeError { peer_id, error, .. } => {
-                        println!("node error: {}", error);
+                        error!("node error: {:?}", error);
                         self.connected_nodes.remove(&peer_id);
                         return Ok(Async::Ready(Some(ServiceEvent::NodeClosed { id: peer_id })));
                     }
@@ -169,17 +280,20 @@ where
                         multiaddr, error, ..
                     } => {
                         self.need_connect.push(multiaddr);
-                        println!("dial error: {}", error);
+                        error!("dial error: {:?}", error);
+                        continue;
                     }
                     RawSwarmEvent::IncomingConnection(incoming) => {
                         incoming.accept(CITANodeHandler::new());
+                        continue;
                     }
                     RawSwarmEvent::IncomingConnectionError {
                         send_back_addr,
                         error,
                         ..
                     } => {
-                        println!("node {} incoming error: {}", send_back_addr, error);
+                        error!("node {} incoming error: {:?}", send_back_addr, error);
+                        continue;
                     }
                     RawSwarmEvent::Replaced { peer_id, .. } => {
                         if let Some(info) = self.connected_nodes.remove(&peer_id) {
@@ -188,16 +302,22 @@ where
                                 Endpoint::Dialer => self.need_connect.push(info.address),
                             }
                         }
+                        continue;
                     }
                     RawSwarmEvent::ListenerClosed {
                         listen_addr,
                         result,
                         ..
                     } => {
-                        println!("listener {} closed, result: {:?}", listen_addr, result);
+                        error!("listener {} closed, result: {:?}", listen_addr, result);
+                        continue;
                     }
                 },
                 Async::NotReady => return Ok(Async::NotReady),
+            };
+
+            if let Some(event) = self.event_handle(id, event) {
+                return Ok(Async::Ready(Some(event)));
             }
         }
     }
@@ -220,37 +340,23 @@ where
         }
 
         let _ = self.service_handle.poll();
-        if let Some(address) = self.service_handle.new_dialer() {
-            if let Err(address) = self.swarm.dial(address, CITANodeHandler::new()) {
-                self.need_connect.push(address);
-            }
-        }
-        if let Some(address) = self.service_handle.new_listen() {
-            if let Ok(address) = self.swarm.listen_on(address) {
-                self.listening_address.push(address);
-            }
-        }
-        self.service_handle
-            .send_message()
-            .into_iter()
-            .for_each(|(id, protocol, data)| match id {
-                Some(id) => self.send_custom_message(id, protocol, data),
-                None => self.broadcast(protocol, data),
-            });
+        self.handle_hook();
 
         Ok(Async::NotReady)
     }
 }
 
+/// Create a new service
 pub fn build_service<Handle: ServiceHandle>(
     local_private_key: secio::SecioKeyPair,
     service_handle: Handle,
 ) -> Service<Handle> {
     let local_public_key = local_private_key.clone().to_public_key();
-    let local_peer_id = local_public_key.into_peer_id();
+    let local_peer_id = local_public_key.clone().into_peer_id();
     let swarm = build_swarm(local_private_key);
     Service {
         swarm,
+        local_public_key,
         local_peer_id,
         listening_address: Vec::new(),
         connected_nodes: HashMap::new(),
@@ -261,12 +367,7 @@ pub fn build_service<Handle: ServiceHandle>(
 
 fn build_swarm(
     local_private_key: secio::SecioKeyPair,
-) -> RawSwarm<
-    Boxed<(PeerId, StreamMuxerBox)>,
-    CITAInEvent,
-    CITAOutEvent,
-    CITANodeHandler<Substream<StreamMuxerBox>>,
-> {
+) -> P2PRawSwarm {
     let transport = build_transport(local_private_key);
 
     RawSwarm::new(transport)

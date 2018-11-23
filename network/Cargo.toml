@@ -8,3 +8,5 @@ core-p2p = { path = "../core-p2p" }
 futures = "0.1"
 tokio = "0.1"
 crossbeam-channel= "0.3.2"
+env_logger  = "0.6"
+log = "0.4.6"

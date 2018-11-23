@@ -3,9 +3,12 @@ extern crate futures;
 extern crate tokio;
 #[macro_use]
 extern crate crossbeam_channel;
+extern crate env_logger;
+#[macro_use]
+extern crate log;
 
 use core_p2p::{
-    custom_proto::p2p_proto::Request,
+    custom_proto::encode_decode::Request,
     secio,
     service::{build_service, ServiceEvent, ServiceHandle},
     Multiaddr, PeerId,
@@ -13,13 +16,13 @@ use core_p2p::{
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use futures::prelude::*;
 use futures::sync::mpsc::{unbounded as future_unbounded, UnboundedReceiver, UnboundedSender};
-use std::io::{Error, ErrorKind};
-use std::thread;
-use std::str;
+use std::{env, str, thread};
 
+#[allow(dead_code)]
 enum Task {
     Dial(Multiaddr),
     Listen(Multiaddr),
+    Disconnect(PeerId),
     Messages(Vec<(Option<PeerId>, usize, Request)>),
 }
 
@@ -28,6 +31,7 @@ struct Process {
     event_sender: Sender<ServiceEvent>,
     new_dialer: Vec<Multiaddr>,
     new_listen: Vec<Multiaddr>,
+    disconnect: Vec<PeerId>,
     messages_buffer: Vec<(Option<PeerId>, usize, Request)>,
 }
 
@@ -42,6 +46,7 @@ impl Process {
                 event_sender,
                 new_dialer: Vec::new(),
                 new_listen: Vec::new(),
+                disconnect: Vec::new(),
                 messages_buffer: Vec::new(),
             },
             task_sender,
@@ -52,24 +57,21 @@ impl Process {
 
 impl Stream for Process {
     type Item = ();
-    type Error = Error;
+    type Error = ();
 
-    fn poll(&mut self) -> Poll<Option<()>, Error> {
-        match self
-            .task_receiver
-            .poll()
-            .map_err(|_| Error::new(ErrorKind::Other, ""))?
-        {
+    fn poll(&mut self) -> Poll<Option<()>, ()> {
+        match self.task_receiver.poll()? {
             Async::Ready(Some(task)) => {
                 match task {
                     Task::Dial(address) => self.new_dialer.push(address),
                     Task::Listen(address) => self.new_listen.push(address),
                     Task::Messages(messages) => self.messages_buffer.extend(messages),
+                    Task::Disconnect(id) => self.disconnect.push(id),
                 }
-                return Ok(Async::Ready(Some(())));
+                Ok(Async::Ready(Some(())))
             }
-            Async::Ready(None) => return Ok(Async::Ready(None)),
-            Async::NotReady => return Ok(Async::NotReady),
+            Async::Ready(None) => Ok(Async::Ready(None)),
+            Async::NotReady => Ok(Async::NotReady),
         }
     }
 }
@@ -89,12 +91,19 @@ impl ServiceHandle for Process {
         self.new_listen.pop()
     }
 
+    fn disconnect(&mut self) -> Option<PeerId> {
+        self.disconnect.pop()
+    }
+
     fn send_message(&mut self) -> Vec<(Option<PeerId>, usize, Request)> {
         self.messages_buffer.drain(..).collect()
     }
 }
 
 fn main() {
+    env::set_var("RUST_LOG", "network=info");
+    env_logger::init();
+
     let key_pair = secio::SecioKeyPair::secp256k1_generated().unwrap();
     let (service_handle, task_sender, event_receiver) = Process::new();
     let mut service = build_service(key_pair, service_handle);
@@ -105,6 +114,7 @@ fn main() {
     let key_pair = secio::SecioKeyPair::secp256k1_generated().unwrap();
     let (service_handle, task_sender_1, event_receiver_1) = Process::new();
     let mut service = build_service(key_pair, service_handle);
+    let _ = service.listen_on("/ip4/127.0.0.1/tcp/1338".parse().unwrap());
     let _ = service.dial("/ip4/127.0.0.1/tcp/1337".parse().unwrap());
 
     thread::spawn(move || tokio::run(service.map_err(|_| ()).for_each(|_| Ok(()))));
@@ -116,30 +126,39 @@ fn main() {
                     Ok(event) => {
                         match event {
                             ServiceEvent::CustomMessage {id, protocol, data} => {
-                                let value = data.unwrap();
-                                println!("0 {:?} , {:?} , {:?}", id, protocol, str::from_utf8(&value));
-                                let _ = task_sender.unbounded_send(Task::Messages(vec![(None, 0, "hello too".as_bytes().to_vec())]));
+                                if let Some(value) = data {
+                                    info!("0 {:?}, {:?}, {:?}", id, protocol, str::from_utf8(&value));
+                                }
+
+                                let _ = task_sender.unbounded_send(Task::Messages(vec![(None, 0, b"hello too".to_vec())]));
+                            }
+                            ServiceEvent::NodeInfo {id, listen_address} => {
+                                info!("{:?} {:?}", id, listen_address);
                             }
                             _ => {}
                         }
                     }
-                    Err(_) => {}
+                    Err(err) => error!("{}", err)
                 }
             }
             recv(event_receiver_1) -> event => {
                 match event {
                     Ok(event) => {
                         match event {
-                            ServiceEvent::CustomMessage {id ,protocol, data } => {
-                                let value = data.unwrap();
-                                println!("1 {:?} , {:?} , {:?}", id, protocol, str::from_utf8(&value));
+                            ServiceEvent::CustomMessage {id, protocol, data } => {
+                                if let Some(value) = data {
+                                    info!("0 {:?}, {:?}, {:?}", id, protocol, str::from_utf8(&value));
+                                }
                             },
+                            ServiceEvent::NodeInfo {id, listen_address} => {
+                                info!("1 {:?} {:?}", id, listen_address);
+                            }
                             _ => {}
                         }
                     },
-                    Err(_) => {}
+                    Err(err) => error!("{}", err)
                 }
-                let _ = task_sender_1.unbounded_send(Task::Messages(vec![(None, 0, "hello".as_bytes().to_vec())]));
+                let _ = task_sender_1.unbounded_send(Task::Messages(vec![(None, 0, b"hello".to_vec())]));
             }
         )
     }
