@@ -5,7 +5,7 @@ extern crate tokio;
 extern crate crossbeam_channel;
 
 use core_p2p::{
-    custom_proto::cita_proto::CitaRequest,
+    custom_proto::p2p_proto::Request,
     secio,
     service::{build_service, ServiceEvent, ServiceHandle},
     Multiaddr, PeerId,
@@ -15,11 +15,12 @@ use futures::prelude::*;
 use futures::sync::mpsc::{unbounded as future_unbounded, UnboundedReceiver, UnboundedSender};
 use std::io::{Error, ErrorKind};
 use std::thread;
+use std::str;
 
 enum Task {
     Dial(Multiaddr),
     Listen(Multiaddr),
-    Messages(Vec<(Option<PeerId>, usize, CitaRequest)>),
+    Messages(Vec<(Option<PeerId>, usize, Request)>),
 }
 
 struct Process {
@@ -27,7 +28,7 @@ struct Process {
     event_sender: Sender<ServiceEvent>,
     new_dialer: Vec<Multiaddr>,
     new_listen: Vec<Multiaddr>,
-    messages_buffer: Vec<(Option<PeerId>, usize, CitaRequest)>,
+    messages_buffer: Vec<(Option<PeerId>, usize, Request)>,
 }
 
 impl Process {
@@ -88,7 +89,7 @@ impl ServiceHandle for Process {
         self.new_listen.pop()
     }
 
-    fn send_message(&mut self) -> Vec<(Option<PeerId>, usize, CitaRequest)> {
+    fn send_message(&mut self) -> Vec<(Option<PeerId>, usize, Request)> {
         self.messages_buffer.drain(..).collect()
     }
 }
@@ -114,9 +115,10 @@ fn main() {
                 match event {
                     Ok(event) => {
                         match event {
-                            ServiceEvent::CustomMessage {id, data, ..} => {
-                                println!("{:?}, {:?}", id, data);
-                                let _ = task_sender.unbounded_send(Task::Messages(vec![(None, 0, (String::from("hello too"), Vec::new()))]));
+                            ServiceEvent::CustomMessage {id, protocol, data} => {
+                                let value = data.unwrap();
+                                println!("0 {:?} , {:?} , {:?}", id, protocol, str::from_utf8(&value));
+                                let _ = task_sender.unbounded_send(Task::Messages(vec![(None, 0, "hello too".as_bytes().to_vec())]));
                             }
                             _ => {}
                         }
@@ -126,10 +128,18 @@ fn main() {
             }
             recv(event_receiver_1) -> event => {
                 match event {
-                    Ok(event) => println!("1 {:?}", event),
+                    Ok(event) => {
+                        match event {
+                            ServiceEvent::CustomMessage {id ,protocol, data } => {
+                                let value = data.unwrap();
+                                println!("1 {:?} , {:?} , {:?}", id, protocol, str::from_utf8(&value));
+                            },
+                            _ => {}
+                        }
+                    },
                     Err(_) => {}
                 }
-                let _ = task_sender_1.unbounded_send(Task::Messages(vec![(None, 0, (String::from("hello"), Vec::new()))]));
+                let _ = task_sender_1.unbounded_send(Task::Messages(vec![(None, 0, "hello".as_bytes().to_vec())]));
             }
         )
     }
