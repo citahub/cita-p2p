@@ -101,7 +101,10 @@ impl ServiceHandle for Process {
 }
 
 fn main() {
-    env::set_var("RUST_LOG", "network=info");
+    let log_env = env::var("RUST_LOG")
+        .and_then(|value| Ok(format!("{}, netwrok=info", value)))
+        .unwrap_or_else(|_| "network=info".to_string());
+    env::set_var("RUST_LOG", log_env);
     env_logger::init();
 
     let key_pair = secio::SecioKeyPair::secp256k1_generated().unwrap();

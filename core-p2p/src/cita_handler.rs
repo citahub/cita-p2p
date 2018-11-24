@@ -431,7 +431,6 @@ where
     type OutboundOpenInfo = ();
     type Substream = Substream;
 
-
     fn inject_substream(
         &mut self,
         substream: Substream,
@@ -462,8 +461,7 @@ where
                     match dial {
                         UpgradePurpose::Custom(id) => {
                             let config =
-                                upgrade::map(CustomProtocol::new(id, &[0]),
-                                    FinalUpgrade::Custom);
+                                upgrade::map(CustomProtocol::new(id, &[0]), FinalUpgrade::Custom);
                             let upgrade = upgrade::apply(substream, config, Endpoint::Dialer);
                             self.upgrades_in_progress_dial
                                 .push((dial, Box::new(upgrade)));
@@ -517,9 +515,7 @@ where
         trace!("shutdown");
     }
 
-    fn poll(
-        &mut self,
-    ) -> NodePollResult<Substream> {
+    fn poll(&mut self) -> NodePollResult<Substream> {
         match self.poll_upgrades_in_progress()? {
             Async::Ready(value) => return Ok(Async::Ready(value.map(NodeHandlerEvent::Custom))),
             Async::NotReady => (),

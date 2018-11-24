@@ -365,9 +365,7 @@ pub fn build_service<Handle: ServiceHandle>(
     }
 }
 
-fn build_swarm(
-    local_private_key: secio::SecioKeyPair,
-) -> P2PRawSwarm {
+fn build_swarm(local_private_key: secio::SecioKeyPair) -> P2PRawSwarm {
     let transport = build_transport(local_private_key);
 
     RawSwarm::new(transport)
