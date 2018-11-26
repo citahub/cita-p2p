@@ -1,134 +1,175 @@
-use byteorder::{ByteOrder, NetworkEndian};
-use bytes::BufMut;
-use bytes::BytesMut;
-use std::io;
-use tokio::codec::{Decoder, Encoder};
+use bytes::Bytes;
+use crate::custom_proto::encode_decode::{Codec, Request, Response};
+use futures::{self, prelude::*, stream, task};
+use libp2p::core::{ConnectionUpgrade, Endpoint};
+use std::{collections::VecDeque, vec::IntoIter};
+use tokio::codec::{Decoder, Framed};
+use tokio::io::{AsyncRead, AsyncWrite};
 
-pub type Request = Vec<u8>;
-pub type Response = Option<Vec<u8>>;
-
-/// Our multiplexed line-based codec
-pub struct Codec;
-
-/// Implementation of the multiplexed line-based protocol.
-///
-/// Frames begin with a 4 byte header, consisting of the numeric request ID
-/// encoded in network order, followed by the frame payload encoded as a UTF-8
-/// string and terminated with a '\n' character:
-///
-/// # An example frame:
-///
-/// +------------------------+--------------------------+
-/// | Type                   | Content                  |
-/// +------------------------+--------------------------+
-/// | Symbol for Start       | \xDEADBEEF               |
-/// | Length of Full Payload | u32                      |
-/// +------------------------+--------------------------+
-/// | Message                | a serialize data         |
-/// +------------------------+--------------------------+
-///
-
-// Start of network messages.
-const NETMSG_START: u64 = 0xDEAD_BEEF_0000_0000;
-
-fn opt_bytes_extend(buf: &mut BytesMut, data: &[u8]) {
-    buf.reserve(data.len());
-    unsafe {
-        buf.bytes_mut()[..data.len()].copy_from_slice(data);
-        buf.advance_mut(data.len());
-    }
+pub struct CustomProtocol {
+    id: usize,
+    name: Bytes,
+    supported_versions: Vec<u8>,
 }
 
-impl Decoder for Codec {
-    type Item = Request;
-    type Error = io::Error;
+impl CustomProtocol {
+    pub fn new(protocol: usize, versions: &[u8]) -> Self {
+        let mut name = Bytes::from_static(b"/cita/");
+        name.extend_from_slice(&[protocol as u8]);
+        name.extend_from_slice(b"/");
 
-    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, io::Error> {
-        Ok(network_message_to_pubsub_message(buf))
-    }
-}
-
-impl Encoder for Codec {
-    type Item = Response;
-    type Error = io::Error;
-
-    fn encode(&mut self, msg: Self::Item, buf: &mut BytesMut) -> io::Result<()> {
-        pubsub_message_to_network_message(buf, msg);
-        Ok(())
-    }
-}
-
-pub fn pubsub_message_to_network_message(buf: &mut BytesMut, msg: Option<Vec<u8>>) {
-    let mut request_id_bytes = [0; 8];
-
-    if let Some(body) = msg {
-        let length_full = body.len();
-        if length_full > u32::max_value() as usize {
-            //            error!(
-            //                "The MQ message with key {} is too long {}.",
-            //                key,
-            //                body.len()
-            //            );
-            return;
+        CustomProtocol {
+            name,
+            id: protocol,
+            supported_versions: {
+                let mut tmp = versions.to_vec();
+                tmp.sort_unstable_by(|a, b| b.cmp(&a));
+                tmp
+            },
         }
-        let request_id = NETMSG_START + length_full as u64;
-        NetworkEndian::write_u64(&mut request_id_bytes, request_id);
-        opt_bytes_extend(buf, &request_id_bytes);
-        opt_bytes_extend(buf, &body);
-    } else {
-        let request_id = NETMSG_START;
-        NetworkEndian::write_u64(&mut request_id_bytes, request_id);
-        opt_bytes_extend(buf, &request_id_bytes);
+    }
+
+    #[inline]
+    pub fn id(&self) -> usize {
+        self.id
     }
 }
 
-pub fn network_message_to_pubsub_message(buf: &mut BytesMut) -> Option<Vec<u8>> {
-    if buf.len() < 8 {
-        return None;
-    }
-
-    let request_id = NetworkEndian::read_u64(buf.as_ref());
-    let netmsg_start = request_id & 0xffff_ffff_0000_0000;
-    let length_full = (request_id & 0x0000_0000_ffff_ffff) as usize;
-    if netmsg_start != NETMSG_START {
-        return None;
-    }
-
-    if length_full == 0 {
-        return None;
-    }
-
-    if length_full + 8 > buf.len() {
-        return None;
-    }
-
-    let _ = buf.split_to(8);
-    let payload_buf = buf.split_to(length_full);
-
-    Some(payload_buf.to_vec())
+pub struct CustomProtocolSubstream<Substream> {
+    is_closing: bool,
+    /// Buffer to send
+    send_queue: VecDeque<Request>,
+    /// if true, we should call `poll_complete`
+    requires_poll_complete: bool,
+    /// The underlying substream
+    inner: stream::Fuse<Framed<Substream, Codec>>,
+    protocol_id: usize,
+    protocol_version: u8,
+    /// Task to notify when something is changed and must to be polled.
+    notify: Option<task::Task>,
 }
 
-#[cfg(test)]
-mod test {
-    use super::{network_message_to_pubsub_message, pubsub_message_to_network_message};
-    use bytes::BytesMut;
-
-    #[test]
-    fn convert_empty_message() {
-        let mut buf = BytesMut::with_capacity(4 + 4);
-        pubsub_message_to_network_message(&mut buf, None);
-        let pub_msg_opt = network_message_to_pubsub_message(&mut buf);
-        assert!(pub_msg_opt.is_none());
+impl<Substream> CustomProtocolSubstream<Substream> {
+    #[inline]
+    pub fn protocol_id(&self) -> usize {
+        self.protocol_id
     }
 
-    #[test]
-    fn convert_messages() {
-        let msg: Vec<u8> = vec![1, 3, 5, 7, 9];
-        let mut buf = BytesMut::with_capacity(4 + 4 + msg.len());
-        pubsub_message_to_network_message(&mut buf, Some(msg.clone()));
-        let pub_msg_opt = network_message_to_pubsub_message(&mut buf);
-        assert!(pub_msg_opt.is_some());
-        let msg_new = pub_msg_opt.unwrap();
-        assert_eq!(msg, msg_new);
+    #[inline]
+    pub fn protocol_version(&self) -> u8 {
+        self.protocol_version
+    }
+
+    pub fn shutdown(&mut self) {
+        self.is_closing = true;
+        if let Some(task) = self.notify.take() {
+            task.notify();
+        }
+    }
+
+    pub fn send_message(&mut self, data: Request) {
+        self.send_queue.push_back(data);
+
+        if let Some(task) = self.notify.take() {
+            task.notify();
+        }
+    }
+}
+
+impl<Substream> Stream for CustomProtocolSubstream<Substream>
+where
+    Substream: AsyncRead + AsyncWrite,
+{
+    type Item = Response;
+    type Error = ::std::io::Error;
+
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        if self.is_closing {
+            return Ok(self.inner.close()?.map(|()| None));
+        }
+
+        // Flushing the local queue.
+        while let Some(packet) = self.send_queue.pop_front() {
+            match self.inner.start_send(Some(packet))? {
+                AsyncSink::NotReady(Some(packet)) => {
+                    self.send_queue.push_front(packet);
+                    break;
+                }
+                AsyncSink::NotReady(None) => {
+                    break;
+                }
+                AsyncSink::Ready => self.requires_poll_complete = true,
+            }
+        }
+
+        // Flushing if necessary.
+        if self.requires_poll_complete {
+            if let Async::Ready(()) = self.inner.poll_complete()? {
+                self.requires_poll_complete = false;
+            }
+        }
+
+        // Receiving incoming packets.
+        // Note that `inner` is wrapped in a `Fuse`, therefore we can poll it forever.
+        #[cfg_attr(feature = "cargo-clippy", allow(never_loop))]
+        loop {
+            match self.inner.poll()? {
+                Async::Ready(Some(data)) => return Ok(Async::Ready(Some(Some(data)))),
+                Async::Ready(None) => if !self.requires_poll_complete && self.send_queue.is_empty()
+                {
+                    return Ok(Async::Ready(None));
+                } else {
+                    break;
+                },
+                Async::NotReady => break,
+            }
+        }
+
+        self.notify = Some(task::current());
+        Ok(Async::NotReady)
+    }
+}
+
+impl<Substream> ConnectionUpgrade<Substream> for CustomProtocol
+where
+    Substream: AsyncRead + AsyncWrite,
+{
+    type NamesIter = IntoIter<(Bytes, Self::UpgradeIdentifier)>;
+    type UpgradeIdentifier = u8; // Protocol version
+
+    #[inline]
+    fn protocol_names(&self) -> Self::NamesIter {
+        self.supported_versions
+            .iter()
+            .map(|&ver| {
+                let num = ver.to_string();
+                let mut name = self.name.clone();
+                name.extend_from_slice(num.as_bytes());
+                (name, ver)
+            }).collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    type Output = CustomProtocolSubstream<Substream>;
+    type Future = futures::future::FutureResult<Self::Output, ::std::io::Error>;
+
+    #[inline]
+    fn upgrade(
+        self,
+        socket: Substream,
+        protocol_version: Self::UpgradeIdentifier,
+        _endpoint: Endpoint,
+    ) -> Self::Future {
+        let framed = Codec.framed(socket);
+
+        futures::future::ok(CustomProtocolSubstream {
+            is_closing: false,
+            send_queue: VecDeque::new(),
+            requires_poll_complete: false,
+            inner: framed.fuse(),
+            protocol_id: self.id,
+            protocol_version,
+            notify: None,
+        })
     }
 }
