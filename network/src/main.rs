@@ -11,7 +11,7 @@ use core_p2p::{
     custom_proto::encode_decode::Request,
     secio,
     service::{build_service, ServiceEvent, ServiceHandle},
-    Multiaddr, PeerId,
+    Multiaddr,
 };
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use futures::prelude::*;
@@ -22,8 +22,8 @@ use std::{env, str, thread};
 enum Task {
     Dial(Multiaddr),
     Listen(Multiaddr),
-    Disconnect(PeerId),
-    Messages(Vec<(Option<PeerId>, usize, Request)>),
+    Disconnect(usize),
+    Messages(Vec<(Option<usize>, usize, Request)>),
 }
 
 struct Process {
@@ -31,8 +31,8 @@ struct Process {
     event_sender: Sender<ServiceEvent>,
     new_dialer: Vec<Multiaddr>,
     new_listen: Vec<Multiaddr>,
-    disconnect: Vec<PeerId>,
-    messages_buffer: Vec<(Option<PeerId>, usize, Request)>,
+    disconnect: Vec<usize>,
+    messages_buffer: Vec<(Option<usize>, usize, Request)>,
 }
 
 impl Process {
@@ -91,18 +91,18 @@ impl ServiceHandle for Process {
         self.new_listen.pop()
     }
 
-    fn disconnect(&mut self) -> Option<PeerId> {
+    fn disconnect(&mut self) -> Option<usize> {
         self.disconnect.pop()
     }
 
-    fn send_message(&mut self) -> Vec<(Option<PeerId>, usize, Request)> {
+    fn send_message(&mut self) -> Vec<(Option<usize>, usize, Request)> {
         self.messages_buffer.drain(..).collect()
     }
 }
 
 fn main() {
     let log_env = env::var("RUST_LOG")
-        .and_then(|value| Ok(format!("{}, netwrok=info", value)))
+        .and_then(|value| Ok(format!("{},network=info", value)))
         .unwrap_or_else(|_| "network=info".to_string());
     env::set_var("RUST_LOG", log_env);
     env_logger::init();
@@ -128,15 +128,15 @@ fn main() {
                 match event {
                     Ok(event) => {
                         match event {
-                            ServiceEvent::CustomMessage {id, protocol, data} => {
+                            ServiceEvent::CustomMessage {index, protocol, data} => {
                                 if let Some(value) = data {
-                                    info!("0 {:?}, {:?}, {:?}", id, protocol, str::from_utf8(&value));
+                                    info!("0 {:?}, {:?}, {:?}", index, protocol, str::from_utf8(&value));
                                 }
 
                                 let _ = task_sender.unbounded_send(Task::Messages(vec![(None, 0, b"hello too".to_vec())]));
                             }
-                            ServiceEvent::NodeInfo {id, listen_address} => {
-                                info!("{:?} {:?}", id, listen_address);
+                            ServiceEvent::NodeInfo {index, listen_address} => {
+                                info!("{:?} {:?}", index, listen_address);
                             }
                             _ => {}
                         }
@@ -148,13 +148,13 @@ fn main() {
                 match event {
                     Ok(event) => {
                         match event {
-                            ServiceEvent::CustomMessage {id, protocol, data } => {
+                            ServiceEvent::CustomMessage {index, protocol, data } => {
                                 if let Some(value) = data {
-                                    info!("0 {:?}, {:?}, {:?}", id, protocol, str::from_utf8(&value));
+                                    info!("1 {:?}, {:?}, {:?}", index, protocol, str::from_utf8(&value));
                                 }
                             },
-                            ServiceEvent::NodeInfo {id, listen_address} => {
-                                info!("1 {:?} {:?}", id, listen_address);
+                            ServiceEvent::NodeInfo {index, listen_address} => {
+                                info!("1 {:?} {:?}", index, listen_address);
                             }
                             _ => {}
                         }

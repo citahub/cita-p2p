@@ -14,7 +14,7 @@ use crate::custom_proto::{
     p2p_proto::{CustomProtocol, CustomProtocolSubstream},
 };
 
-type IdentifyBack = Arc<Mutex<Option<Box<Future<Item = (), Error = Error> + Send>>>>;
+type IdentifyBack = Arc<Mutex<Option<Box<dyn Future<Item = (), Error = Error> + Send>>>>;
 type DialUpgradeQueue<Substream> = Vec<(
     UpgradePurpose,
     Box<dyn Future<Item = FinalUpgrade<Substream>, Error = Error> + Send>,
@@ -52,6 +52,8 @@ pub enum CITAOutEvent<Substream> {
         /// Address the remote observes us as.
         observed_addr: Multiaddr,
     },
+    NeedReDial,
+    OverMaxConnection,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
