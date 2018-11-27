@@ -7,7 +7,7 @@ extern crate tokio;
 #[macro_use]
 extern crate log;
 
-pub use libp2p::{secio, Multiaddr, PeerId};
+pub use libp2p::{secio, Multiaddr};
 
 pub use cita_handler::{CITAInEvent, CITANodeHandler, CITAOutEvent};
 

@@ -17,6 +17,9 @@ use std::time::Duration;
 use std::usize;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+const MAX_OUTBOUND: usize = 30;
+const MAX_INBOUND: usize = 30;
+
 type P2PRawSwarm = RawSwarm<
     Boxed<(PeerId, StreamMuxerBox)>,
     CITAInEvent,
@@ -28,24 +31,24 @@ type P2PRawSwarm = RawSwarm<
 pub enum ServiceEvent {
     /// Closed connection to a node.
     NodeClosed {
-        id: PeerId,
+        index: usize,
     },
     CustomProtocolOpen {
-        id: PeerId,
+        index: usize,
         protocol: usize,
         version: u8,
     },
     CustomProtocolClosed {
-        id: PeerId,
+        index: usize,
         protocol: usize,
     },
     CustomMessage {
-        id: PeerId,
+        index: usize,
         protocol: usize,
         data: Response,
     },
     NodeInfo {
-        id: PeerId,
+        index: usize,
         listen_address: Vec<Multiaddr>,
     },
 }
@@ -63,11 +66,11 @@ pub trait ServiceHandle: Sync + Send + Stream<Item = (), Error = ()> {
         None
     }
     /// Disconnect a peer
-    fn disconnect(&mut self) -> Option<PeerId> {
+    fn disconnect(&mut self) -> Option<usize> {
         None
     }
     /// Send message to specified node
-    fn send_message(&mut self) -> Vec<(Option<PeerId>, usize, Request)> {
+    fn send_message(&mut self) -> Vec<(Option<usize>, usize, Request)> {
         Vec::new()
     }
 }
@@ -79,13 +82,20 @@ pub struct Service<Handle> {
     local_peer_id: PeerId,
     listening_address: Vec<Multiaddr>,
     /// Connected node information
-    connected_nodes: HashMap<PeerId, NodeInfo>,
+    connected_nodes: HashMap<usize, NodeInfo>,
+    peer_index: HashMap<PeerId, usize>,
     need_connect: Vec<Multiaddr>,
     service_handle: Handle,
+    next_index: usize,
+    /// Number of inbound nodes
+    outbound_num: usize,
+    /// Number of outbound connections
+    inbound_num: usize,
 }
 
 #[derive(Clone, Debug)]
 pub struct NodeInfo {
+    id: PeerId,
     endpoint: Endpoint,
     address: Multiaddr,
 }
@@ -127,13 +137,35 @@ where
         self.swarm.dial(addr, CITANodeHandler::new())
     }
 
-    /// Disconnect a peer
+    /// Disconnect a peer by id
     #[inline]
-    pub fn drop_node(&mut self, id: PeerId) {
-        self.connected_nodes.remove(&id);
-        if let Some(connected) = self.swarm.peer(id).as_connected() {
-            connected.close();
+    pub fn drop_node(&mut self, id: PeerId) -> Option<usize> {
+        if let Some(index) = self.peer_index.remove(&id) {
+            if let Some(info) = self.connected_nodes.remove(&index) {
+                match info.endpoint {
+                    Endpoint::Dialer => self.outbound_num -= 1,
+                    Endpoint::Listener => self.inbound_num -= 1,
+                }
+            };
+            if let Some(connected) = self.swarm.peer(id).as_connected() {
+                connected.close();
+            }
+            Some(index)
+        } else {
+            None
         }
+    }
+
+    /// Index to peer id
+    #[inline]
+    pub fn get_index_by_id(&self, id: &PeerId) -> Option<&usize> {
+        self.peer_index.get(id)
+    }
+
+    /// Peer id to index
+    #[inline]
+    pub fn get_info_by_index(&self, id: usize) -> Option<&NodeInfo> {
+        self.connected_nodes.get(&id)
     }
 
     /// Service handle process
@@ -149,14 +181,20 @@ where
                 self.listening_address.push(address);
             }
         }
-        while let Some(id) = self.service_handle.disconnect() {
-            self.drop_node(id);
+        while let Some(index) = self.service_handle.disconnect() {
+            if let Some(info) = self.get_info_by_index(index).cloned() {
+                self.drop_node(info.id);
+            }
         }
         self.service_handle
             .send_message()
             .into_iter()
-            .for_each(|(id, protocol, data)| match id {
-                Some(id) => self.send_custom_message(&id, protocol, data),
+            .for_each(|(index, protocol, data)| match index {
+                Some(index) => {
+                    if let Some(info) = self.get_info_by_index(index).cloned() {
+                        self.send_custom_message(&info.id, protocol, data)
+                    }
+                }
                 None => self.broadcast(protocol, data),
             });
     }
@@ -169,11 +207,11 @@ where
     ) where
         Substream: AsyncRead + AsyncWrite + Send + 'static,
     {
-        if let Some(info) = self.connected_nodes.get(&requester) {
+        if let Some(index) = self.get_index_by_id(&requester) {
             responder.respond(
                 self.local_public_key.clone(),
                 self.listening_address.clone(),
-                &info.address,
+                &self.get_info_by_index(*index).unwrap().address,
             )
         }
     }
@@ -202,25 +240,25 @@ where
         match event {
             CITAOutEvent::CustomProtocolOpen { protocol, version } => {
                 Some(ServiceEvent::CustomProtocolOpen {
-                    id: peer_id,
+                    index: *self.get_index_by_id(&peer_id).unwrap(),
                     protocol,
                     version,
                 })
             }
             CITAOutEvent::CustomMessage { protocol, data } => Some(ServiceEvent::CustomMessage {
-                id: peer_id,
+                index: *self.get_index_by_id(&peer_id).unwrap(),
                 protocol,
                 data,
             }),
+            // if custom protocol close, the node must drop
             CITAOutEvent::CustomProtocolClosed { protocol, .. } => {
-                Some(ServiceEvent::CustomProtocolClosed {
-                    id: peer_id,
-                    protocol,
-                })
+                let index = self.drop_node(peer_id).unwrap();
+                Some(ServiceEvent::CustomProtocolClosed { index, protocol })
             }
+            // if node is useless, must drop
             CITAOutEvent::Useless => {
-                self.connected_nodes.remove(&peer_id);
-                Some(ServiceEvent::NodeClosed { id: peer_id })
+                let index = self.drop_node(peer_id).unwrap();
+                Some(ServiceEvent::NodeClosed { index })
             }
             CITAOutEvent::PingStart => {
                 debug!("ping start");
@@ -240,9 +278,20 @@ where
             } => {
                 self.add_observed_addr(&observed_addr);
                 Some(ServiceEvent::NodeInfo {
-                    id: peer_id,
+                    index: *self.get_index_by_id(&peer_id).unwrap(),
                     listen_address: info.listen_addrs,
                 })
+            }
+            CITAOutEvent::NeedReDial => {
+                while let Some(addr) = self.need_connect.pop() {
+                    let _ = self.dial(addr);
+                }
+                None
+            }
+            CITAOutEvent::OverMaxConnection => {
+                self.drop_node(peer_id);
+                self.next_index -= 1;
+                None
             }
         }
     }
@@ -254,24 +303,39 @@ where
                 Async::Ready(event) => match event {
                     RawSwarmEvent::Connected { peer_id, endpoint } => {
                         let (address, endpoint) = match endpoint {
-                            ConnectedPoint::Dialer { address } => (address, Endpoint::Dialer),
+                            ConnectedPoint::Dialer { address } => {
+                                self.outbound_num += 1;
+                                (address, Endpoint::Dialer)
+                            }
                             ConnectedPoint::Listener { send_back_addr, .. } => {
+                                self.inbound_num += 1;
                                 (send_back_addr, Endpoint::Listener)
                             }
                         };
-                        self.connected_nodes
-                            .insert(peer_id, NodeInfo { address, endpoint });
-                        continue;
+                        self.connected_nodes.insert(
+                            self.next_index,
+                            NodeInfo {
+                                id: peer_id.clone(),
+                                address,
+                                endpoint,
+                            },
+                        );
+                        self.peer_index.insert(peer_id.clone(), self.next_index);
+                        // may be overflow?
+                        self.next_index += 1;
+
+                        if self.outbound_num < MAX_INBOUND || self.outbound_num < MAX_OUTBOUND {
+                            continue;
+                        } else {
+                            // Disconnected more than the maximum number of connections
+                            (peer_id, CITAOutEvent::OverMaxConnection)
+                        }
                     }
                     RawSwarmEvent::NodeEvent { peer_id, event } => (peer_id, event),
-                    RawSwarmEvent::NodeClosed { peer_id, .. } => {
-                        self.connected_nodes.remove(&peer_id);
-                        return Ok(Async::Ready(Some(ServiceEvent::NodeClosed { id: peer_id })));
-                    }
+                    RawSwarmEvent::NodeClosed { peer_id, .. } => (peer_id, CITAOutEvent::Useless),
                     RawSwarmEvent::NodeError { peer_id, error, .. } => {
                         error!("node error: {:?}", error);
-                        self.connected_nodes.remove(&peer_id);
-                        return Ok(Async::Ready(Some(ServiceEvent::NodeClosed { id: peer_id })));
+                        (peer_id, CITAOutEvent::Useless)
                     }
                     RawSwarmEvent::DialError {
                         multiaddr, error, ..
@@ -279,9 +343,9 @@ where
                     | RawSwarmEvent::UnknownPeerDialError {
                         multiaddr, error, ..
                     } => {
+                        error!("Dial err: {}", error);
                         self.need_connect.push(multiaddr);
-                        error!("dial error: {:?}", error);
-                        continue;
+                        (self.local_peer_id.clone(), CITAOutEvent::NeedReDial)
                     }
                     RawSwarmEvent::IncomingConnection(incoming) => {
                         incoming.accept(CITANodeHandler::new());
@@ -296,13 +360,16 @@ where
                         continue;
                     }
                     RawSwarmEvent::Replaced { peer_id, .. } => {
-                        if let Some(info) = self.connected_nodes.remove(&peer_id) {
-                            match info.endpoint {
-                                Endpoint::Listener => {}
-                                Endpoint::Dialer => self.need_connect.push(info.address),
+                        if let Some(index) = self.peer_index.remove(&peer_id) {
+                            self.connected_nodes.remove(&index);
+                            if let Some(info) = self.connected_nodes.remove(&index) {
+                                match info.endpoint {
+                                    Endpoint::Listener => {}
+                                    Endpoint::Dialer => self.need_connect.push(info.address),
+                                }
                             }
                         }
-                        continue;
+                        (peer_id, CITAOutEvent::NeedReDial)
                     }
                     RawSwarmEvent::ListenerClosed {
                         listen_addr,
@@ -360,8 +427,12 @@ pub fn build_service<Handle: ServiceHandle>(
         local_peer_id,
         listening_address: Vec::new(),
         connected_nodes: HashMap::new(),
+        peer_index: HashMap::new(),
         need_connect: Vec::new(),
         service_handle,
+        next_index: 0,
+        inbound_num: 0,
+        outbound_num: 0,
     }
 }
 
