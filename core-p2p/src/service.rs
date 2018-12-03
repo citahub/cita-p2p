@@ -49,6 +49,7 @@ pub enum ServiceEvent {
     },
     NodeInfo {
         index: usize,
+        endpoint: Endpoint,
         listen_address: Vec<Multiaddr>,
     },
 }
@@ -105,11 +106,9 @@ where
     Handle: ServiceHandle,
 {
     /// Send message to specified node
-    pub fn send_custom_message(&mut self, node: &PeerId, protocol: usize, data: Request) {
-        if let Some(mut connected) = self.swarm.peer(node.clone()).as_connected() {
+    pub fn send_custom_message(&mut self, node: PeerId, protocol: usize, data: Request) {
+        if let Some(mut connected) = self.swarm.peer(node).as_connected() {
             connected.send_event(CITAInEvent::SendCustomMessage { protocol, data });
-        } else {
-            debug!("Try to send message to {:?}, but not connected", node);
         }
     }
 
@@ -177,9 +176,7 @@ where
             }
         }
         while let Some(address) = self.service_handle.new_listen() {
-            if let Ok(address) = self.swarm.listen_on(address) {
-                self.listening_address.push(address);
-            }
+            let _ = self.swarm.listen_on(address);
         }
         while let Some(index) = self.service_handle.disconnect() {
             if let Some(info) = self.get_info_by_index(index).cloned() {
@@ -195,7 +192,9 @@ where
                 } else {
                     indexes.into_iter().for_each(|index| {
                         if let Some(info) = self.get_info_by_index(index).cloned() {
-                            self.send_custom_message(&info.id, protocol, data.clone())
+                            self.send_custom_message(info.id, protocol, data.clone())
+                        } else {
+                            debug!("Try to send message to {:?}, but not connected", index);
                         }
                     })
                 }
@@ -280,8 +279,11 @@ where
                 observed_addr,
             } => {
                 self.add_observed_addr(&observed_addr);
+                let index = *self.get_index_by_id(&peer_id).unwrap();
+                let endpoint = self.connected_nodes[&index].endpoint;
                 Some(ServiceEvent::NodeInfo {
-                    index: *self.get_index_by_id(&peer_id).unwrap(),
+                    index,
+                    endpoint,
                     listen_address: info.listen_addrs,
                 })
             }
@@ -418,12 +420,12 @@ where
 
 /// Create a new service
 pub fn build_service<Handle: ServiceHandle>(
-    local_private_key: secio::SecioKeyPair,
+    key_pair: secio::SecioKeyPair,
     service_handle: Handle,
 ) -> Service<Handle> {
-    let local_public_key = local_private_key.clone().to_public_key();
+    let local_public_key = key_pair.clone().to_public_key();
     let local_peer_id = local_public_key.clone().into_peer_id();
-    let swarm = build_swarm(local_private_key);
+    let swarm = build_swarm(key_pair);
     Service {
         swarm,
         local_public_key,
@@ -439,19 +441,19 @@ pub fn build_service<Handle: ServiceHandle>(
     }
 }
 
-fn build_swarm(local_private_key: secio::SecioKeyPair) -> P2PRawSwarm {
-    let transport = build_transport(local_private_key);
+fn build_swarm(key_pair: secio::SecioKeyPair) -> P2PRawSwarm {
+    let transport = build_transport(key_pair);
 
     RawSwarm::new(transport)
 }
 
-fn build_transport(local_private_key: secio::SecioKeyPair) -> Boxed<(PeerId, StreamMuxerBox)> {
+fn build_transport(key_pair: secio::SecioKeyPair) -> Boxed<(PeerId, StreamMuxerBox)> {
     let mut mplex_config = mplex::MplexConfig::new();
     mplex_config.max_buffer_len_behaviour(mplex::MaxBufferBehaviour::Block);
     mplex_config.max_buffer_len(usize::MAX);
 
     let base = libp2p::CommonTransport::new()
-        .with_upgrade(secio::SecioConfig::new(local_private_key))
+        .with_upgrade(secio::SecioConfig::new(key_pair))
         .and_then(move |out, endpoint| {
             let upgrade = upgrade::or(
                 upgrade::map(yamux::Config::default(), either::EitherOutput::First),

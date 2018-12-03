@@ -135,8 +135,8 @@ fn main() {
 
                                 let _ = task_sender.unbounded_send(Task::Messages(vec![(Vec::new(), 0, b"hello too".to_vec())]));
                             }
-                            ServiceEvent::NodeInfo {index, listen_address} => {
-                                info!("{:?} {:?}", index, listen_address);
+                            ServiceEvent::NodeInfo {index, endpoint, listen_address} => {
+                                info!("{:?} {:?} {:?}", index, listen_address, endpoint);
                             }
                             _ => {}
                         }
@@ -153,8 +153,8 @@ fn main() {
                                     info!("1 {:?}, {:?}, {:?}", index, protocol, str::from_utf8(&value));
                                 }
                             },
-                            ServiceEvent::NodeInfo {index, listen_address} => {
-                                info!("1 {:?} {:?}", index, listen_address);
+                            ServiceEvent::NodeInfo {index, endpoint, listen_address} => {
+                                info!("1 {:?} {:?} {:?}", index, listen_address, endpoint);
                             }
                             _ => {}
                         }
