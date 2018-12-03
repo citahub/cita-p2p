@@ -26,7 +26,6 @@ type NodePollResult<Substream> = Poll<Option<NodeHandlerEvent<(), CITAOutEvent<S
 pub enum CITAInEvent {
     Accept,
     SendCustomMessage { protocol: usize, data: Request },
-    Ping,
 }
 
 pub enum CITAOutEvent<Substream> {
@@ -503,9 +502,6 @@ where
             CITAInEvent::Accept => {}
             CITAInEvent::SendCustomMessage { protocol, data } => {
                 self.send_custom_message(protocol, data);
-            }
-            CITAInEvent::Ping => {
-                self.ping_remote();
             }
         }
     }

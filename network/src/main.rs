@@ -23,7 +23,7 @@ enum Task {
     Dial(Multiaddr),
     Listen(Multiaddr),
     Disconnect(usize),
-    Messages(Vec<(Option<usize>, usize, Request)>),
+    Messages(Vec<(Vec<usize>, usize, Request)>),
 }
 
 struct Process {
@@ -32,7 +32,7 @@ struct Process {
     new_dialer: Vec<Multiaddr>,
     new_listen: Vec<Multiaddr>,
     disconnect: Vec<usize>,
-    messages_buffer: Vec<(Option<usize>, usize, Request)>,
+    messages_buffer: Vec<(Vec<usize>, usize, Request)>,
 }
 
 impl Process {
@@ -95,7 +95,7 @@ impl ServiceHandle for Process {
         self.disconnect.pop()
     }
 
-    fn send_message(&mut self) -> Vec<(Option<usize>, usize, Request)> {
+    fn send_message(&mut self) -> Vec<(Vec<usize>, usize, Request)> {
         self.messages_buffer.drain(..).collect()
     }
 }
@@ -133,7 +133,7 @@ fn main() {
                                     info!("0 {:?}, {:?}, {:?}", index, protocol, str::from_utf8(&value));
                                 }
 
-                                let _ = task_sender.unbounded_send(Task::Messages(vec![(None, 0, b"hello too".to_vec())]));
+                                let _ = task_sender.unbounded_send(Task::Messages(vec![(Vec::new(), 0, b"hello too".to_vec())]));
                             }
                             ServiceEvent::NodeInfo {index, listen_address} => {
                                 info!("{:?} {:?}", index, listen_address);
@@ -161,7 +161,7 @@ fn main() {
                     },
                     Err(err) => error!("{}", err)
                 }
-                let _ = task_sender_1.unbounded_send(Task::Messages(vec![(None, 0, b"hello".to_vec())]));
+                let _ = task_sender_1.unbounded_send(Task::Messages(vec![(Vec::new(), 0, b"hello".to_vec())]));
             }
         )
     }

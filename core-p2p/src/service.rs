@@ -70,7 +70,7 @@ pub trait ServiceHandle: Sync + Send + Stream<Item = (), Error = ()> {
         None
     }
     /// Send message to specified node
-    fn send_message(&mut self) -> Vec<(Option<usize>, usize, Request)> {
+    fn send_message(&mut self) -> Vec<(Vec<usize>, usize, Request)> {
         Vec::new()
     }
 }
@@ -189,13 +189,16 @@ where
         self.service_handle
             .send_message()
             .into_iter()
-            .for_each(|(index, protocol, data)| match index {
-                Some(index) => {
-                    if let Some(info) = self.get_info_by_index(index).cloned() {
-                        self.send_custom_message(&info.id, protocol, data)
-                    }
+            .for_each(|(indexes, protocol, data)| {
+                if indexes.is_empty() {
+                    self.broadcast(protocol, data)
+                } else {
+                    indexes.into_iter().for_each(|index| {
+                        if let Some(info) = self.get_info_by_index(index).cloned() {
+                            self.send_custom_message(&info.id, protocol, data.clone())
+                        }
+                    })
                 }
-                None => self.broadcast(protocol, data),
             });
     }
 
