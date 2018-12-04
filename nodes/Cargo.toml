@@ -1,5 +1,5 @@
 [package]
-name = "network"
+name = "nodes"
 version = "0.1.0"
 authors = ["piaoliu <441594700@qq.com>"]
 
@@ -11,7 +11,11 @@ crossbeam-channel= "0.3.2"
 env_logger  = "0.6"
 log = "0.4.6"
 
+serde = "*"
+serde_derive = "*"
+serde_json = "*"
+
 [[bin]]
-src = "node"
+name = "node"
 path = "src/node.rs"
 

@@ -25,9 +25,10 @@ use futures::sync::mpsc::{unbounded as future_unbounded, UnboundedReceiver, Unbo
 use std::{env, str, thread};
 use std::collections::HashMap;
 
+#[derive(Serialize, Deserialize)]
 enum MessageType {
-    SHARE_ADDR,
-    RETURN_NODE_ADDRS
+    ShareAddr,
+    ReturnNodeAddrs
 }
 
 #[derive(Serialize, Deserialize)]
@@ -129,22 +130,25 @@ fn main() {
     env::set_var("RUST_LOG", log_env);
     env_logger::init();
 
-/*
     let key_pair = secio::SecioKeyPair::secp256k1_generated().unwrap();
     let (service_handle, task_sender, event_receiver) = Process::new();
     let mut service = build_service(key_pair, service_handle);
-    let _ = service.listen_on("/ip4/127.0.0.1/tcp/1337".parse().unwrap());
+    let addr = service.listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap());
 
-    thread::spawn(move || tokio::run(service.map_err(|_| ()).for_each(|_| Ok(()))));
-*/
-    let key_pair = secio::SecioKeyPair::secp256k1_generated().unwrap();
-    let (service_handle, task_sender_1, event_receiver_1) = Process::new();
-    let mut service = build_service(key_pair, service_handle);
-    let _ = service.listen_on("/ip4/127.0.0.1/tcp/1338".parse().unwrap());
-    let _ = service.dial("/ip4/127.0.0.1/tcp/1337".parse().unwrap());
+    let mut dial_node = false;
+    if let Some(to_dial) = std::env::args().nth(1) {
+        //let _ = service.dial("/ip4/127.0.0.1/tcp/1337".parse().unwrap());
+        println!("to dial {:?}", to_dial);
+        let _ = service.dial(to_dial.parse().unwrap());
+        dial_node = true;
+    }
 
-    thread::spawn(move || tokio::run(service.map_err(|_| ()).for_each(|_| Ok(()))));
-
+    thread::spawn(move || {
+        println!("listening on {:?}", addr);
+        tokio::run(service.map_err(|_| ()).for_each(|_| Ok(())))
+    
+    });
+    
     loop {
         select!(
     /*
@@ -170,25 +174,39 @@ fn main() {
                 }
             }
     */
-            recv(event_receiver_1) -> event => {
+            recv(event_receiver) -> event => {
                 match event {
                     Ok(event) => {
                         info!("==> {:?}", event);
                         match event {
-                            ServiceEvent::CustomMessage {index, protocol, data } => {
-                                if let Some(value) = data {
-                                    info!("1 {:?}, {:?}, {:?}", index, protocol, str::from_utf8(&value));
+                            ServiceEvent::CustomProtocolOpen {index, protocol, version } => {
+                                if dial_node {
+                                    // here, send my addr
+                                    let my_addr_msg = Message {
+                                        mtype: MessageType::ShareAddr,
+                                        data: b"hello boy!".to_vec(),
+                                        timestamp: 0
+                                    };
+                                    let msg_str = serde_json::to_string(&my_addr_msg).unwrap();
+                                    let _ = task_sender.unbounded_send(Task::Messages(vec![(Vec::new(), 0, msg_str.into_bytes() )]));
                                 }
                             },
                             ServiceEvent::NodeInfo {index, endpoint, listen_address} => {
                                 info!("1 {:?} {:?} {:?}", index, listen_address, endpoint);
-                            }
+                            },
+                            ServiceEvent::CustomMessage {index, protocol, data } => {
+                                if let Some(value) = data {
+                                    info!("1 {:?}, {:?}, {:?}", index, protocol, str::from_utf8(&value));
+                                    // here, parse message
+                                    // check message type
+
+                                }
+                            },
                             _ => {}
                         }
                     },
                     Err(err) => error!("{}", err)
                 }
-                let _ = task_sender_1.unbounded_send(Task::Messages(vec![(Vec::new(), 0, b"hello".to_vec())]));
             }
         )
     }

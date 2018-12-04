@@ -1,2 +1,6 @@
 [workspace]
-members = ["core-p2p", "network"]
+members = [
+  "core-p2p", 
+  "network",
+  "nodes"
+]
