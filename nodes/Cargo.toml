@@ -1,0 +1,17 @@
+[package]
+name = "network"
+version = "0.1.0"
+authors = ["piaoliu <441594700@qq.com>"]
+
+[dependencies]
+core-p2p = { path = "../core-p2p" }
+futures = "0.1"
+tokio = "0.1"
+crossbeam-channel= "0.3.2"
+env_logger  = "0.6"
+log = "0.4.6"
+
+[[bin]]
+src = "node"
+path = "src/node.rs"
+
