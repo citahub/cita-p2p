@@ -25,18 +25,25 @@ use futures::sync::mpsc::{unbounded as future_unbounded, UnboundedReceiver, Unbo
 use std::{env, str, thread};
 use std::collections::HashMap;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 enum MessageType {
     ShareAddr,
     ReturnNodeAddrs
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Message {
     mtype: MessageType,
-    data: Vec<u8>,
+    //data: Vec<u8>,
+    data: String,
     timestamp: u64,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+struct NodeAddrs {
+    pub node_addrs: HashMap<String, usize>,
+}
+
 
 #[allow(dead_code)]
 enum Task {
@@ -54,7 +61,6 @@ struct Process {
     disconnect: Vec<usize>,
     messages_buffer: Vec<(Vec<usize>, usize, Request)>,
     
-    node_addrs: HashMap<String, (String, usize)>,
 }
 
 impl Process {
@@ -70,7 +76,6 @@ impl Process {
                 new_listen: Vec::new(),
                 disconnect: Vec::new(),
                 messages_buffer: Vec::new(),
-                node_addrs: HashMap::new(),
             },
             task_sender,
             event_receiver,
@@ -125,15 +130,21 @@ impl ServiceHandle for Process {
 
 fn main() {
     let log_env = env::var("RUST_LOG")
-        .and_then(|value| Ok(format!("{},network=info", value)))
-        .unwrap_or_else(|_| "network=info".to_string());
+        .and_then(|value| Ok(format!("{},node=info", value)))
+        .unwrap_or_else(|_| "node=info".to_string());
     env::set_var("RUST_LOG", log_env);
     env_logger::init();
 
     let key_pair = secio::SecioKeyPair::secp256k1_generated().unwrap();
     let (service_handle, task_sender, event_receiver) = Process::new();
     let mut service = build_service(key_pair, service_handle);
-    let addr = service.listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap());
+    let addr = service.listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+
+    let mut nas = NodeAddrs {
+        node_addrs: HashMap::new() 
+    };
+    // for test now
+    nas.node_addrs.insert(addr.clone().to_string(), 1);
 
     let mut dial_node = false;
     if let Some(to_dial) = std::env::args().nth(1) {
@@ -143,12 +154,14 @@ fn main() {
         dial_node = true;
     }
 
+    let localaddr = addr.clone();
     thread::spawn(move || {
-        println!("listening on {:?}", addr);
+        info!("listening on {:?}", addr);
         tokio::run(service.map_err(|_| ()).for_each(|_| Ok(())))
     
     });
     
+
     loop {
         select!(
     /*
@@ -184,7 +197,8 @@ fn main() {
                                     // here, send my addr
                                     let my_addr_msg = Message {
                                         mtype: MessageType::ShareAddr,
-                                        data: b"hello boy!".to_vec(),
+                                        //data: b"hello boy!".to_vec(),
+                                        data: localaddr.to_string(),
                                         timestamp: 0
                                     };
                                     let msg_str = serde_json::to_string(&my_addr_msg).unwrap();
@@ -197,8 +211,38 @@ fn main() {
                             ServiceEvent::CustomMessage {index, protocol, data } => {
                                 if let Some(value) = data {
                                     info!("1 {:?}, {:?}, {:?}", index, protocol, str::from_utf8(&value));
+                                    let value_str = str::from_utf8(&value).unwrap();
+                                    let msg: Message = serde_json::from_str(value_str).unwrap();
+                                    info!("{:?}", msg);
                                     // here, parse message
                                     // check message type
+                                    match msg.mtype {
+                                        MessageType::ShareAddr => {
+                                            let addr = msg.data;
+                                            info!("{:?}", addr);
+                                            nas.node_addrs.entry(addr).or_insert(0);
+
+                                            info!("{:?}", nas);
+
+                                            // XXX: here, contains the from addr just now, but for test
+                                            // now
+                                            let addr_list_str = serde_json::to_string(&nas.node_addrs).unwrap(); 
+                                            let return_addrs_msg = Message {
+                                                mtype: MessageType::ReturnNodeAddrs,
+                                                //data: b"hello boy!".to_vec(),
+                                                data: addr_list_str,
+                                                timestamp: 0
+                                            };
+                                            let return_addrs_msg = serde_json::to_string(&return_addrs_msg).unwrap(); 
+                                            let _ = task_sender.unbounded_send(Task::Messages(vec![(Vec::new(), 0, return_addrs_msg.into_bytes() )]));
+
+                                        },
+                                        MessageType::ReturnNodeAddrs => {
+                                            let addrs = msg.data;
+                                            info!("{:?}", addrs);
+
+                                        }
+                                    }
 
                                 }
                             },
