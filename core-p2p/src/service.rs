@@ -37,6 +37,7 @@ pub enum ServiceEvent {
         index: usize,
         protocol: usize,
         version: u8,
+        endpoint: Endpoint,
     },
     CustomProtocolClosed {
         index: usize,
@@ -49,7 +50,6 @@ pub enum ServiceEvent {
     },
     NodeInfo {
         index: usize,
-        endpoint: Endpoint,
         listen_address: Vec<Multiaddr>,
     },
 }
@@ -241,10 +241,13 @@ where
     {
         match event {
             CITAOutEvent::CustomProtocolOpen { protocol, version } => {
+                let index = *self.get_index_by_id(&peer_id).unwrap();
+                let endpoint = self.connected_nodes[&index].endpoint;
                 Some(ServiceEvent::CustomProtocolOpen {
                     index: *self.get_index_by_id(&peer_id).unwrap(),
                     protocol,
                     version,
+                    endpoint,
                 })
             }
             CITAOutEvent::CustomMessage { protocol, data } => Some(ServiceEvent::CustomMessage {
@@ -280,10 +283,8 @@ where
             } => {
                 self.add_observed_addr(&observed_addr);
                 let index = *self.get_index_by_id(&peer_id).unwrap();
-                let endpoint = self.connected_nodes[&index].endpoint;
                 Some(ServiceEvent::NodeInfo {
                     index,
-                    endpoint,
                     listen_address: info.listen_addrs,
                 })
             }

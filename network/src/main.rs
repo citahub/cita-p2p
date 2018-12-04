@@ -9,9 +9,9 @@ extern crate log;
 
 use core_p2p::{
     custom_proto::encode_decode::Request,
-    secio,
+    libp2p::secio,
+    libp2p::Multiaddr,
     service::{build_service, ServiceEvent, ServiceHandle},
-    Multiaddr,
 };
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use futures::prelude::*;
@@ -135,8 +135,8 @@ fn main() {
 
                                 let _ = task_sender.unbounded_send(Task::Messages(vec![(Vec::new(), 0, b"hello too".to_vec())]));
                             }
-                            ServiceEvent::NodeInfo {index, endpoint, listen_address} => {
-                                info!("{:?} {:?} {:?}", index, listen_address, endpoint);
+                            ServiceEvent::NodeInfo {index, listen_address} => {
+                                info!("{:?} {:?}", index, listen_address);
                             }
                             _ => {}
                         }
@@ -153,8 +153,8 @@ fn main() {
                                     info!("1 {:?}, {:?}, {:?}", index, protocol, str::from_utf8(&value));
                                 }
                             },
-                            ServiceEvent::NodeInfo {index, endpoint, listen_address} => {
-                                info!("1 {:?} {:?} {:?}", index, listen_address, endpoint);
+                            ServiceEvent::NodeInfo {index, listen_address} => {
+                                info!("1 {:?} {:?}", index, listen_address);
                             }
                             _ => {}
                         }
