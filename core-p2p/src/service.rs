@@ -77,7 +77,7 @@ pub trait ServiceHandle: Sync + Send + Stream<Item = (), Error = ()> {
 }
 
 /// Encapsulation of raw_swarm, providing external interfaces
-pub struct Service<Handle> {
+pub struct Service<Handle: ServiceHandle> {
     swarm: P2PRawSwarm,
     local_public_key: PublicKey,
     local_peer_id: PeerId,
@@ -349,9 +349,8 @@ where
                     | RawSwarmEvent::UnknownPeerDialError {
                         multiaddr, error, ..
                     } => {
-                        error!("Dial err: {}", error);
-                        self.need_connect.push(multiaddr);
-                        (self.local_peer_id.clone(), CITAOutEvent::NeedReDial)
+                        error!("Dial {:?} err: {}", multiaddr, error);
+                        continue;
                     }
                     RawSwarmEvent::IncomingConnection(incoming) => {
                         incoming.accept(CITANodeHandler::new());
@@ -366,16 +365,8 @@ where
                         continue;
                     }
                     RawSwarmEvent::Replaced { peer_id, .. } => {
-                        if let Some(index) = self.peer_index.remove(&peer_id) {
-                            self.connected_nodes.remove(&index);
-                            if let Some(info) = self.connected_nodes.remove(&index) {
-                                match info.endpoint {
-                                    Endpoint::Listener => {}
-                                    Endpoint::Dialer => self.need_connect.push(info.address),
-                                }
-                            }
-                        }
-                        (peer_id, CITAOutEvent::NeedReDial)
+                        error!("connect replace");
+                        (peer_id, CITAOutEvent::Useless)
                     }
                     RawSwarmEvent::ListenerClosed {
                         listen_addr,
@@ -416,6 +407,22 @@ where
         self.handle_hook();
 
         Ok(Async::NotReady)
+    }
+}
+
+impl<Handle> Drop for Service<Handle>
+where
+    Handle: ServiceHandle,
+{
+    fn drop(&mut self) {
+        let nodes = self
+            .connected_nodes
+            .values()
+            .cloned()
+            .collect::<Vec<NodeInfo>>();
+        nodes.into_iter().for_each(|info| {
+            self.drop_node(info.id);
+        });
     }
 }
 
