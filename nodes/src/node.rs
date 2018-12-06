@@ -18,6 +18,7 @@ use core_p2p::{
     secio,
     service::{build_service, ServiceEvent, ServiceHandle},
     Multiaddr,
+    Endpoint
 };
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use futures::prelude::*;
@@ -141,27 +142,27 @@ fn main() {
     let key_pair = secio::SecioKeyPair::secp256k1_generated().unwrap();
     let (service_handle, task_sender, event_receiver) = Process::new();
     let mut service = build_service(key_pair, service_handle);
-    let addr = service.listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+    let addr = service.listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap().to_string();
 
     let mut nas = NodeManager {
         node_addrs: HashMap::new(),
         node_conns: HashMap::new()
     };
     // for test now
-    nas.node_addrs.insert(addr.clone().to_string(), 1);
+    nas.node_addrs.insert(addr.clone(), 1);
 
     let mut dial_node = false;
     if let Some(to_dial) = std::env::args().nth(1) {
-        println!("to dial {:?}", to_dial);
+        info!("to dial {:?}", to_dial);
         let _ = service.dial(to_dial.parse().unwrap());
         dial_node = true;
     }
 
     let localaddr = addr.clone();
+    info!("localaddr {:?}", localaddr);
+    info!("listening on {:?}", localaddr );
     thread::spawn(move || {
-        info!("listening on {:?}", addr);
         tokio::run(service.map_err(|_| ()).for_each(|_| Ok(())))
-    
     });
     
 
@@ -170,11 +171,11 @@ fn main() {
             recv(event_receiver) -> event => {
                 match event {
                     Ok(event) => {
-                        info!("==> {:?}", event);
                         match event {
-                            ServiceEvent::CustomProtocolOpen {index, protocol, version } => {
+                            ServiceEvent::CustomProtocolOpen {index, protocol, version, node_info} => {
+                                info!("in CustomProtocolOpen {:?} {:?} {:?} {:?}", index, protocol, version, node_info);
                                 // each connection opened, this arm was entered.
-                                if dial_node {
+                                if node_info.endpoint == Endpoint::Dialer {
                                     // here, send my addr
                                     let my_addr_msg = Message {
                                         mtype: MessageType::ShareAddr,
@@ -183,38 +184,37 @@ fn main() {
                                     };
                                     let msg_str = serde_json::to_string(&my_addr_msg).unwrap();
                                     
-                                    info!("{:?}", msg_str);
+                                    info!("nas {:?}", msg_str);
                                     let _ = task_sender.unbounded_send(Task::Messages(vec![(vec![index], 0, msg_str.into_bytes() )]));
                                 }
-                                // here, connection opened, record it 
-                                nas.node_conns.entry(index).or_insert(protocol);
-                                info!("{:?}", nas);
+                                else if node_info.endpoint == Endpoint::Listener {
+                                    // here, connection opened, record it 
+                                    nas.node_conns.entry(index).or_insert(protocol);
+                                    info!("nas {:?}", nas);
+                                }
                             },
                             ServiceEvent::NodeInfo {index, endpoint, listen_address} => {
-                                info!("node info {:?} {:?} {:?}", index, listen_address, endpoint);
+                                //info!("node info {:?} {:?} {:?}", index, listen_address, endpoint);
                             },
                             ServiceEvent::CustomMessage {index, protocol, data } => {
                                 if let Some(value) = data {
-                                    info!("1 {:?}, {:?}, {:?}", index, protocol, str::from_utf8(&value));
                                     let value_str = str::from_utf8(&value).unwrap();
                                     let msg: Message = serde_json::from_str(value_str).unwrap();
-                                    info!("{:?}", msg);
+                                    info!("Message {:?}", msg);
                                     // here, parse message
                                     // check message type
                                     match msg.mtype {
                                         MessageType::ShareAddr => {
                                             let addr = msg.data;
-                                            info!("{:?}", addr);
                                             nas.node_addrs.entry(addr.clone()).or_insert(0);
 
-                                            info!("{:?}", nas);
+                                            info!("nas {:?}", nas);
 
                                             // XXX: here, contains the from addr just now, but for test
                                             // now
                                             let addr_list_str = serde_json::to_string(&nas.node_addrs).unwrap(); 
                                             let return_addrs_msg = Message {
                                                 mtype: MessageType::ReturnNodeAddrs,
-                                                //data: b"hello boy!".to_vec(),
                                                 data: addr_list_str,
                                                 timestamp: 0
                                             };
@@ -224,30 +224,45 @@ fn main() {
                                             // XXX: here, forward the ShareAddr message to
                                             // neigborhood, except the one message come from 
                                             // from = index
-                                            let other_neigbors: Vec<usize> = nas.node_conns.keys().take_while(|x| x != &&index).cloned().collect();
+                                            info!("now index is {:?}", index);
+                                            //let other_neigbors: Vec<usize> = nas.node_conns.keys().take_while(|x| x != &&index).cloned().collect();
+                                            let mut other_neigbors = Vec::new();
+                                            let node_conns = nas.node_conns.clone();
+                                            for (key, _) in node_conns {
+                                                if key != index {
+                                                    other_neigbors.push(key.clone());
+                                                }
+                                            }
+
                                             info!("other_neigbors {:?}", other_neigbors);
                                             let pass_share_addr = Message {
                                                 mtype: MessageType::PassShareAddr,
-                                                data: addr,
+                                                data: addr.clone(),
                                                 timestamp: 0
                                             };
                                             info!("pass_share_addr {:?}", pass_share_addr);
                                             let pass_share_addr_str = serde_json::to_string(&pass_share_addr).unwrap(); 
                                             if other_neigbors.len() > 0 {
-                                                //let _ = task_sender.unbounded_send(Task::Messages(vec![(other_neigbors, 0, pass_share_addr_str.into_bytes() )]));
+                                                let _ = task_sender.unbounded_send(Task::Messages(vec![(other_neigbors, 0, pass_share_addr_str.into_bytes() )]));
                                             }
-                                            //let _ = task_sender.unbounded_send(Task::Messages(vec![(vec![], 0, b"hello".to_vec() )]));
 
                                         },
                                         MessageType::ReturnNodeAddrs => {
-                                            let addrs = msg.data;
-                                            info!("{:?}", addrs);
+                                            let addrs: HashMap<String, usize> = serde_json::from_str(&msg.data).unwrap();
+                                            info!("ReturnNodeAddrs {:?}", addrs);
 
+                                            for (addr, _) in addrs {
+                                                nas.node_addrs.entry(addr).or_insert(0);
+                                            }
+
+                                            nas.node_conns.entry(index).or_insert(protocol);
+                                            info!("nas {:?}", nas);
                                         },
                                         MessageType::PassShareAddr => {
                                             info!("in passsharaddr");
-                                            let addrs = msg.data;
-                                            info!("in passsharaddr{:?}", addrs);
+                                            let addr = msg.data;
+                                            nas.node_addrs.entry(addr).or_insert(0);
+                                            info!("nas {:?}", nas);
 
                                         },
 

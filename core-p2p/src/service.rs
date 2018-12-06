@@ -37,6 +37,7 @@ pub enum ServiceEvent {
         index: usize,
         protocol: usize,
         version: u8,
+        node_info: NodeInfo
     },
     CustomProtocolClosed {
         index: usize,
@@ -96,9 +97,9 @@ pub struct Service<Handle> {
 
 #[derive(Clone, Debug)]
 pub struct NodeInfo {
-    id: PeerId,
-    endpoint: Endpoint,
-    address: Multiaddr,
+    pub id: PeerId,
+    pub endpoint: Endpoint,
+    pub address: Multiaddr,
 }
 
 impl<Handle> Service<Handle>
@@ -241,10 +242,13 @@ where
     {
         match event {
             CITAOutEvent::CustomProtocolOpen { protocol, version } => {
+                let index = *self.get_index_by_id(&peer_id).unwrap();
+                let node_info = self.get_info_by_index(index).unwrap().to_owned();
                 Some(ServiceEvent::CustomProtocolOpen {
-                    index: *self.get_index_by_id(&peer_id).unwrap(),
+                    index: index,
                     protocol,
                     version,
+                    node_info
                 })
             }
             CITAOutEvent::CustomMessage { protocol, data } => Some(ServiceEvent::CustomMessage {
