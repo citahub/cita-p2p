@@ -28,7 +28,8 @@ use std::collections::HashMap;
 #[derive(Debug, Serialize, Deserialize)]
 enum MessageType {
     ShareAddr,
-    ReturnNodeAddrs
+    PassShareAddr,
+    ReturnNodeAddrs,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -40,8 +41,10 @@ struct Message {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct NodeAddrs {
+struct NodeManager {
     pub node_addrs: HashMap<String, usize>,
+    // <PeerId index, protocol version>
+    pub node_conns: HashMap<usize, usize>
 }
 
 
@@ -140,8 +143,9 @@ fn main() {
     let mut service = build_service(key_pair, service_handle);
     let addr = service.listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
 
-    let mut nas = NodeAddrs {
-        node_addrs: HashMap::new() 
+    let mut nas = NodeManager {
+        node_addrs: HashMap::new(),
+        node_conns: HashMap::new()
     };
     // for test now
     nas.node_addrs.insert(addr.clone().to_string(), 1);
@@ -164,49 +168,31 @@ fn main() {
 
     loop {
         select!(
-    /*
-            recv(event_receiver) -> event => {
-                match event {
-                    Ok(event) => {
-                        info!("--> {:?}", event);
-                        match event {
-                            ServiceEvent::CustomMessage {index, protocol, data} => {
-                                if let Some(value) = data {
-                                    info!("0 {:?}, {:?}, {:?}", index, protocol, str::from_utf8(&value));
-                                }
-
-                                let _ = task_sender.unbounded_send(Task::Messages(vec![(Vec::new(), 0, b"hello too".to_vec())]));
-                            }
-                            ServiceEvent::NodeInfo {index, endpoint, listen_address} => {
-                                info!("{:?} {:?} {:?}", index, listen_address, endpoint);
-                            }
-                            _ => {}
-                        }
-                    }
-                    Err(err) => error!("{}", err)
-                }
-            }
-    */
             recv(event_receiver) -> event => {
                 match event {
                     Ok(event) => {
                         info!("==> {:?}", event);
                         match event {
                             ServiceEvent::CustomProtocolOpen {index, protocol, version } => {
+                                // each connection opened, this arm was entered.
                                 if dial_node {
                                     // here, send my addr
                                     let my_addr_msg = Message {
                                         mtype: MessageType::ShareAddr,
-                                        //data: b"hello boy!".to_vec(),
                                         data: localaddr.to_string(),
                                         timestamp: 0
                                     };
                                     let msg_str = serde_json::to_string(&my_addr_msg).unwrap();
+                                    
+                                    info!("{:?}", msg_str);
                                     let _ = task_sender.unbounded_send(Task::Messages(vec![(Vec::new(), 0, msg_str.into_bytes() )]));
                                 }
+                                // here, connection opened, record it 
+                                nas.node_conns.entry(index).or_insert(protocol);
+                                info!("{:?}", nas);
                             },
                             ServiceEvent::NodeInfo {index, endpoint, listen_address} => {
-                                info!("1 {:?} {:?} {:?}", index, listen_address, endpoint);
+                                info!("node info {:?} {:?} {:?}", index, listen_address, endpoint);
                             },
                             ServiceEvent::CustomMessage {index, protocol, data } => {
                                 if let Some(value) = data {
@@ -220,7 +206,7 @@ fn main() {
                                         MessageType::ShareAddr => {
                                             let addr = msg.data;
                                             info!("{:?}", addr);
-                                            nas.node_addrs.entry(addr).or_insert(0);
+                                            nas.node_addrs.entry(addr.clone()).or_insert(0);
 
                                             info!("{:?}", nas);
 
@@ -236,12 +222,32 @@ fn main() {
                                             let return_addrs_msg = serde_json::to_string(&return_addrs_msg).unwrap(); 
                                             let _ = task_sender.unbounded_send(Task::Messages(vec![(Vec::new(), 0, return_addrs_msg.into_bytes() )]));
 
+                                            // XXX: here, forward the ShareAddr message to
+                                            // neigborhood, except the one message come from 
+                                            // from = index
+                                            let other_neigbors = nas.node_conns.keys().take_while(|x| x != &&index).cloned().collect();
+
+                                            let pass_share_addr = Message {
+                                                mtype: MessageType::PassShareAddr,
+                                                data: addr,
+                                                timestamp: 0
+                                            };
+                                            let pass_share_addr = serde_json::to_string(&pass_share_addr).unwrap(); 
+                                            let _ = task_sender.unbounded_send(Task::Messages(vec![(other_neigbors, 0, pass_share_addr.into_bytes() )]));
+
                                         },
                                         MessageType::ReturnNodeAddrs => {
                                             let addrs = msg.data;
                                             info!("{:?}", addrs);
 
+                                        },
+                                        MessageType::PassShareAddr => {
+                                            info!("in passsharaddr");
+                                            let addrs = msg.data;
+                                            info!("in passsharaddr{:?}", addrs);
+
                                         }
+
                                     }
 
                                 }
