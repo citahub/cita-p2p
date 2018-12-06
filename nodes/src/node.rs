@@ -152,7 +152,6 @@ fn main() {
 
     let mut dial_node = false;
     if let Some(to_dial) = std::env::args().nth(1) {
-        //let _ = service.dial("/ip4/127.0.0.1/tcp/1337".parse().unwrap());
         println!("to dial {:?}", to_dial);
         let _ = service.dial(to_dial.parse().unwrap());
         dial_node = true;
@@ -185,7 +184,7 @@ fn main() {
                                     let msg_str = serde_json::to_string(&my_addr_msg).unwrap();
                                     
                                     info!("{:?}", msg_str);
-                                    let _ = task_sender.unbounded_send(Task::Messages(vec![(Vec::new(), 0, msg_str.into_bytes() )]));
+                                    let _ = task_sender.unbounded_send(Task::Messages(vec![(vec![index], 0, msg_str.into_bytes() )]));
                                 }
                                 // here, connection opened, record it 
                                 nas.node_conns.entry(index).or_insert(protocol);
@@ -220,20 +219,24 @@ fn main() {
                                                 timestamp: 0
                                             };
                                             let return_addrs_msg = serde_json::to_string(&return_addrs_msg).unwrap(); 
-                                            let _ = task_sender.unbounded_send(Task::Messages(vec![(Vec::new(), 0, return_addrs_msg.into_bytes() )]));
+                                            let _ = task_sender.unbounded_send(Task::Messages(vec![(vec![index], 0, return_addrs_msg.into_bytes() )]));
 
                                             // XXX: here, forward the ShareAddr message to
                                             // neigborhood, except the one message come from 
                                             // from = index
-                                            let other_neigbors = nas.node_conns.keys().take_while(|x| x != &&index).cloned().collect();
-
+                                            let other_neigbors: Vec<usize> = nas.node_conns.keys().take_while(|x| x != &&index).cloned().collect();
+                                            info!("other_neigbors {:?}", other_neigbors);
                                             let pass_share_addr = Message {
                                                 mtype: MessageType::PassShareAddr,
                                                 data: addr,
                                                 timestamp: 0
                                             };
-                                            let pass_share_addr = serde_json::to_string(&pass_share_addr).unwrap(); 
-                                            let _ = task_sender.unbounded_send(Task::Messages(vec![(other_neigbors, 0, pass_share_addr.into_bytes() )]));
+                                            info!("pass_share_addr {:?}", pass_share_addr);
+                                            let pass_share_addr_str = serde_json::to_string(&pass_share_addr).unwrap(); 
+                                            if other_neigbors.len() > 0 {
+                                                //let _ = task_sender.unbounded_send(Task::Messages(vec![(other_neigbors, 0, pass_share_addr_str.into_bytes() )]));
+                                            }
+                                            //let _ = task_sender.unbounded_send(Task::Messages(vec![(vec![], 0, b"hello".to_vec() )]));
 
                                         },
                                         MessageType::ReturnNodeAddrs => {
@@ -246,7 +249,7 @@ fn main() {
                                             let addrs = msg.data;
                                             info!("in passsharaddr{:?}", addrs);
 
-                                        }
+                                        },
 
                                     }
 
