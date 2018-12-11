@@ -5,7 +5,6 @@ extern crate futures;
 extern crate tokio;
 
 use core_p2p::{
-    custom_proto::encode_decode::Request,
     libp2p::Multiaddr,
     service::{ServiceEvent, ServiceHandle},
 };
@@ -18,7 +17,7 @@ pub enum Task {
     Dial(Multiaddr),
     Listen(Multiaddr),
     Disconnect(usize),
-    Messages(Vec<(Vec<usize>, usize, Request)>),
+    Messages(Vec<(Vec<usize>, usize, Vec<u8>)>),
 }
 
 pub struct Process {
@@ -27,7 +26,7 @@ pub struct Process {
     new_dialer: Vec<Multiaddr>,
     new_listen: Vec<Multiaddr>,
     disconnect: Vec<usize>,
-    messages_buffer: Vec<(Vec<usize>, usize, Request)>,
+    messages_buffer: Vec<(Vec<usize>, usize, Vec<u8>)>,
 }
 
 impl Process {
@@ -90,7 +89,7 @@ impl ServiceHandle for Process {
         self.disconnect.pop()
     }
 
-    fn send_message(&mut self) -> Vec<(Vec<usize>, usize, Request)> {
+    fn send_message(&mut self) -> Vec<(Vec<usize>, usize, Vec<u8>)> {
         self.messages_buffer.drain(..).collect()
     }
 }

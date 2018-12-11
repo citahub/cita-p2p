@@ -25,10 +25,10 @@ fn main() {
 
     let key_pair = secio::SecioKeyPair::secp256k1_generated().unwrap();
     let (service_handle, _task_sender, event_receiver) = Process::new();
-    let mut service = build_service(key_pair, service_handle, true);
+    let mut service = build_service(key_pair, service_handle, false);
     let _ = service.listen_on("/ip4/127.0.0.1/tcp/1337".parse().unwrap());
-    let _ = service.dial("/ip4/127.0.0.1/tcp/1338".parse().unwrap());
-//    let _ = service.dial("/ip4/127.0.0.1/tcp/1337".parse().unwrap());
+//    let _ = service.dial("/ip4/127.0.0.1/tcp/1338".parse().unwrap());
+    let _ = service.dial("/ip4/127.0.0.1/tcp/1337".parse().unwrap());
 
     thread::spawn(move || tokio::run(service.map_err(|_| ()).for_each(|_| Ok(()))));
 

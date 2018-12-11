@@ -1,21 +1,19 @@
-use cita_handler::{CITAInEvent, CITANodeHandler, CITAOutEvent, IdentificationRequest};
-use custom_proto::encode_decode::{Request, Response};
+use cita_handler::{CITAInEvent, CITANodeHandler, CITAOutEvent};
+//use custom_proto::encode_decode::{Request, Response};
 use futures::prelude::*;
 use libp2p::core::{
-    either,
     multiaddr::Protocol,
     muxing::StreamMuxerBox,
     nodes::raw_swarm::{ConnectedPoint, RawSwarm, RawSwarmEvent},
     nodes::Substream,
     transport::boxed::Boxed,
-    upgrade, Endpoint, Multiaddr, PeerId, PublicKey, Transport,
+    upgrade::{self, OutboundUpgradeExt}, Endpoint, Multiaddr, PeerId, PublicKey, Transport,
 };
 use libp2p::{mplex, secio, yamux, TransportTimeout};
 use std::collections::HashMap;
 use std::io::Error;
 use std::time::Duration;
 use std::usize;
-use tokio::io::{AsyncRead, AsyncWrite};
 
 const MAX_OUTBOUND: usize = 30;
 const MAX_INBOUND: usize = 30;
@@ -23,7 +21,7 @@ const MAX_INBOUND: usize = 30;
 type P2PRawSwarm = RawSwarm<
     Boxed<(PeerId, StreamMuxerBox)>,
     CITAInEvent,
-    CITAOutEvent<Substream<StreamMuxerBox>>,
+    CITAOutEvent,
     CITANodeHandler<Substream<StreamMuxerBox>>,
 >;
 
@@ -33,25 +31,25 @@ pub enum ServiceEvent {
     NodeClosed {
         index: usize,
     },
-    CustomProtocolOpen {
-        index: usize,
-        protocol: usize,
-        version: u8,
-        endpoint: Endpoint,
-    },
-    CustomProtocolClosed {
-        index: usize,
-        protocol: usize,
-    },
-    CustomMessage {
-        index: usize,
-        protocol: usize,
-        data: Response,
-    },
-    NodeInfo {
-        index: usize,
-        listen_address: Vec<Multiaddr>,
-    },
+//    CustomProtocolOpen {
+//        index: usize,
+//        protocol: usize,
+//        version: u8,
+//        endpoint: Endpoint,
+//    },
+//    CustomProtocolClosed {
+//        index: usize,
+//        protocol: usize,
+//    },
+//    CustomMessage {
+//        index: usize,
+//        protocol: usize,
+//        data: Response,
+//    },
+//    NodeInfo {
+//        index: usize,
+//        listen_address: Vec<Multiaddr>,
+//    },
 }
 
 /// Service hook
@@ -71,7 +69,7 @@ pub trait ServiceHandle: Sync + Send + Stream<Item = (), Error = ()> {
         None
     }
     /// Send message to specified node
-    fn send_message(&mut self) -> Vec<(Vec<usize>, usize, Request)> {
+    fn send_message(&mut self) -> Vec<(Vec<usize>, usize, Vec<u8>)> {
         Vec::new()
     }
 }
@@ -105,19 +103,6 @@ impl<Handle> Service<Handle>
 where
     Handle: ServiceHandle,
 {
-    /// Send message to specified node
-    pub fn send_custom_message(&mut self, node: PeerId, protocol: usize, data: Request) {
-        if let Some(mut connected) = self.swarm.peer(node).as_connected() {
-            connected.send_event(CITAInEvent::SendCustomMessage { protocol, data });
-        }
-    }
-
-    /// Send message to all node
-    pub fn broadcast(&mut self, protocol: usize, data: Request) {
-        self.swarm
-            .broadcast_event(&CITAInEvent::SendCustomMessage { protocol, data });
-    }
-
     /// Start listening on a multiaddr.
     #[inline]
     pub fn listen_on(&mut self, addr: Multiaddr) -> Result<Multiaddr, Multiaddr> {
@@ -183,39 +168,22 @@ where
                 self.drop_node(info.id);
             }
         }
-        self.service_handle
-            .send_message()
-            .into_iter()
-            .for_each(|(indexes, protocol, data)| {
-                if indexes.is_empty() {
-                    self.broadcast(protocol, data)
-                } else {
-                    indexes.into_iter().for_each(|index| {
-                        if let Some(info) = self.get_info_by_index(index).cloned() {
-                            self.send_custom_message(info.id, protocol, data.clone())
-                        } else {
-                            debug!("Try to send message to {:?}, but not connected", index);
-                        }
-                    })
-                }
-            });
-    }
-
-    /// Identify respond
-    fn respond_to_identify_request<Substream>(
-        &mut self,
-        requester: &PeerId,
-        responder: IdentificationRequest<Substream>,
-    ) where
-        Substream: AsyncRead + AsyncWrite + Send + 'static,
-    {
-        if let Some(index) = self.get_index_by_id(&requester) {
-            responder.respond(
-                self.local_public_key.clone(),
-                self.listening_address.clone(),
-                &self.get_info_by_index(*index).unwrap().address,
-            )
-        }
+//        self.service_handle
+//            .send_message()
+//            .into_iter()
+//            .for_each(|(indexes, protocol, data)| {
+//                if indexes.is_empty() {
+//                    self.broadcast(protocol, data)
+//                } else {
+//                    indexes.into_iter().for_each(|index| {
+//                        if let Some(info) = self.get_info_by_index(index).cloned() {
+//                            self.send_custom_message(info.id, protocol, data.clone())
+//                        } else {
+//                            debug!("Try to send message to {:?}, but not connected", index);
+//                        }
+//                    })
+//                }
+//            });
     }
 
     fn add_observed_addr(&mut self, address: &Multiaddr) {
@@ -231,35 +199,33 @@ where
     }
 
     /// All Custom Event to throw process
-    fn event_handle<Substream>(
+    fn event_handle(
         &mut self,
         peer_id: PeerId,
-        event: CITAOutEvent<Substream>,
+        event: CITAOutEvent,
     ) -> Option<ServiceEvent>
-    where
-        Substream: AsyncRead + AsyncWrite + Send + 'static,
     {
         match event {
-            CITAOutEvent::CustomProtocolOpen { protocol, version } => {
-                let index = *self.get_index_by_id(&peer_id).unwrap();
-                let endpoint = self.connected_nodes[&index].endpoint;
-                Some(ServiceEvent::CustomProtocolOpen {
-                    index: *self.get_index_by_id(&peer_id).unwrap(),
-                    protocol,
-                    version,
-                    endpoint,
-                })
-            }
-            CITAOutEvent::CustomMessage { protocol, data } => Some(ServiceEvent::CustomMessage {
-                index: *self.get_index_by_id(&peer_id).unwrap(),
-                protocol,
-                data,
-            }),
-            // if custom protocol close, the node must drop
-            CITAOutEvent::CustomProtocolClosed { protocol, .. } => {
-                let index = self.drop_node(peer_id).unwrap();
-                Some(ServiceEvent::CustomProtocolClosed { index, protocol })
-            }
+//            CITAOutEvent::CustomProtocolOpen { protocol, version } => {
+//                let index = *self.get_index_by_id(&peer_id).unwrap();
+//                let endpoint = self.connected_nodes[&index].endpoint;
+//                Some(ServiceEvent::CustomProtocolOpen {
+//                    index: *self.get_index_by_id(&peer_id).unwrap(),
+//                    protocol,
+//                    version,
+//                    endpoint,
+//                })
+//            }
+//            CITAOutEvent::CustomMessage { protocol, data } => Some(ServiceEvent::CustomMessage {
+//                index: *self.get_index_by_id(&peer_id).unwrap(),
+//                protocol,
+//                data,
+//            }),
+//            // if custom protocol close, the node must drop
+//            CITAOutEvent::CustomProtocolClosed { protocol, .. } => {
+//                let index = self.drop_node(peer_id).unwrap();
+//                Some(ServiceEvent::CustomProtocolClosed { index, protocol })
+//            }
             // if node is useless, must drop
             CITAOutEvent::Useless => {
                 let index = self.drop_node(peer_id).unwrap();
@@ -273,21 +239,21 @@ where
                 debug!("ping success on {:?}", time);
                 None
             }
-            CITAOutEvent::IdentificationRequest(request) => {
-                self.respond_to_identify_request(&peer_id, request);
-                None
-            }
-            CITAOutEvent::Identified {
-                info,
-                observed_addr,
-            } => {
-                self.add_observed_addr(&observed_addr);
-                let index = *self.get_index_by_id(&peer_id).unwrap();
-                Some(ServiceEvent::NodeInfo {
-                    index,
-                    listen_address: info.listen_addrs,
-                })
-            }
+//            CITAOutEvent::IdentificationRequest(request) => {
+//                self.respond_to_identify_request(&peer_id, request);
+//                None
+//            }
+//            CITAOutEvent::Identified {
+//                info,
+//                observed_addr,
+//            } => {
+//                self.add_observed_addr(&observed_addr);
+//                let index = *self.get_index_by_id(&peer_id).unwrap();
+//                Some(ServiceEvent::NodeInfo {
+//                    index,
+//                    listen_address: info.listen_addrs,
+//                })
+//            }
             CITAOutEvent::NeedReDial => {
                 while let Some(addr) = self.need_connect.pop() {
                     let _ = self.dial(addr);
@@ -330,7 +296,7 @@ where
                         // may be overflow?
                         self.next_index += 1;
 
-                        if self.outbound_num < MAX_INBOUND || self.outbound_num < MAX_OUTBOUND {
+                        if (self.outbound_num < MAX_INBOUND || self.outbound_num < MAX_OUTBOUND) && peer_id != self.local_peer_id {
                             continue;
                         } else {
                             // Disconnected more than the maximum number of connections
@@ -430,10 +396,11 @@ where
 pub fn build_service<Handle: ServiceHandle>(
     key_pair: secio::SecioKeyPair,
     service_handle: Handle,
+    yamux: bool
 ) -> Service<Handle> {
     let local_public_key = key_pair.clone().to_public_key();
     let local_peer_id = local_public_key.clone().into_peer_id();
-    let swarm = build_swarm(key_pair);
+    let swarm = build_swarm(key_pair, yamux);
     Service {
         swarm,
         local_public_key,
@@ -449,27 +416,43 @@ pub fn build_service<Handle: ServiceHandle>(
     }
 }
 
-fn build_swarm(key_pair: secio::SecioKeyPair) -> P2PRawSwarm {
-    let transport = build_transport(key_pair);
+fn build_swarm(key_pair: secio::SecioKeyPair, yamux: bool) -> P2PRawSwarm {
+    let transport = if yamux {
+        build_transport_yamux(key_pair.clone())
+    } else {
+        build_transport_mplex(key_pair.clone())
+    };
 
-    RawSwarm::new(transport)
+    RawSwarm::new(transport, key_pair.to_peer_id())
 }
 
-fn build_transport(key_pair: secio::SecioKeyPair) -> Boxed<(PeerId, StreamMuxerBox)> {
+fn build_transport_yamux(key_pair: secio::SecioKeyPair) -> Boxed<(PeerId, StreamMuxerBox)> {
+    let base = libp2p::CommonTransport::new()
+        .with_upgrade(secio::SecioConfig::new(key_pair))
+        .and_then(move |out, _endpoint| {
+            let peer_id = out.remote_key.into_peer_id();
+
+            let upgrade = yamux::Config::default().map_outbound(move |muxer| (peer_id, muxer) );
+
+            upgrade::apply_outbound(out.stream, upgrade).map_err(|e| e.into_io_error())
+        }).map(|(id, muxer), _| (id, StreamMuxerBox::new(muxer)));
+
+    TransportTimeout::new(base, Duration::from_secs(20)).boxed()
+}
+
+fn build_transport_mplex(key_pair: secio::SecioKeyPair) -> Boxed<(PeerId, StreamMuxerBox)> {
     let mut mplex_config = mplex::MplexConfig::new();
     mplex_config.max_buffer_len_behaviour(mplex::MaxBufferBehaviour::Block);
     mplex_config.max_buffer_len(usize::MAX);
 
     let base = libp2p::CommonTransport::new()
         .with_upgrade(secio::SecioConfig::new(key_pair))
-        .and_then(move |out, endpoint| {
-            let upgrade = upgrade::or(
-                upgrade::map(yamux::Config::default(), either::EitherOutput::First),
-                upgrade::map(mplex_config, either::EitherOutput::Second),
-            );
+        .and_then(move |out, _endpoint| {
             let peer_id = out.remote_key.into_peer_id();
-            let upgrade = upgrade::map(upgrade, move |muxer| (peer_id, muxer));
-            upgrade::apply(out.stream, upgrade, endpoint.into())
+
+            let upgrade = mplex_config.map_outbound(move |muxer| (peer_id, muxer) );
+
+            upgrade::apply_outbound(out.stream, upgrade).map_err(|e| e.into_io_error())
         }).map(|(id, muxer), _| (id, StreamMuxerBox::new(muxer)));
 
     TransportTimeout::new(base, Duration::from_secs(20)).boxed()
