@@ -7,7 +7,7 @@ use libp2p::core::{
     nodes::raw_swarm::{ConnectedPoint, RawSwarm, RawSwarmEvent},
     nodes::Substream,
     transport::boxed::Boxed,
-    upgrade::{self, OutboundUpgradeExt}, Endpoint, Multiaddr, PeerId, PublicKey, Transport,
+    upgrade::{self, OutboundUpgradeExt, InboundUpgradeExt}, Endpoint, Multiaddr, PeerId, PublicKey, Transport,
 };
 use libp2p::{mplex, secio, yamux, TransportTimeout};
 use std::collections::HashMap;
@@ -429,12 +429,16 @@ fn build_swarm(key_pair: secio::SecioKeyPair, yamux: bool) -> P2PRawSwarm {
 fn build_transport_yamux(key_pair: secio::SecioKeyPair) -> Boxed<(PeerId, StreamMuxerBox)> {
     let base = libp2p::CommonTransport::new()
         .with_upgrade(secio::SecioConfig::new(key_pair))
-        .and_then(move |out, _endpoint| {
+        .and_then(move |out, endpoint| {
             let peer_id = out.remote_key.into_peer_id();
+            let peer_id1 = peer_id.clone();
 
-            let upgrade = yamux::Config::default().map_outbound(move |muxer| (peer_id, muxer) );
+            let upgrade = yamux::Config::default()
+                .map_outbound(move |muxer| (peer_id, muxer) )
+                .map_inbound(move |muxer| (peer_id1, muxer));
 
-            upgrade::apply_outbound(out.stream, upgrade).map_err(|e| e.into_io_error())
+            upgrade::apply(out.stream, upgrade, endpoint)
+                .map_err(|e| e.into_io_error())
         }).map(|(id, muxer), _| (id, StreamMuxerBox::new(muxer)));
 
     TransportTimeout::new(base, Duration::from_secs(20)).boxed()
@@ -447,12 +451,16 @@ fn build_transport_mplex(key_pair: secio::SecioKeyPair) -> Boxed<(PeerId, Stream
 
     let base = libp2p::CommonTransport::new()
         .with_upgrade(secio::SecioConfig::new(key_pair))
-        .and_then(move |out, _endpoint| {
+        .and_then(move |out, endpoint| {
             let peer_id = out.remote_key.into_peer_id();
+            let peer_id1 = peer_id.clone();
 
-            let upgrade = mplex_config.map_outbound(move |muxer| (peer_id, muxer) );
+            let upgrade = mplex_config
+                .map_inbound(move |muxer| (peer_id, muxer))
+                .map_outbound(move |muxer| (peer_id1, muxer));
 
-            upgrade::apply_outbound(out.stream, upgrade).map_err(|e| e.into_io_error())
+            upgrade::apply(out.stream, upgrade, endpoint)
+                .map_err(|e| e.into_io_error())
         }).map(|(id, muxer), _| (id, StreamMuxerBox::new(muxer)));
 
     TransportTimeout::new(base, Duration::from_secs(20)).boxed()
