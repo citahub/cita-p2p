@@ -9,7 +9,7 @@ use libp2p::core::{
     transport::boxed::Boxed,
     upgrade::{self, OutboundUpgradeExt, InboundUpgradeExt}, Endpoint, Multiaddr, PeerId, PublicKey, Transport,
 };
-use libp2p::{mplex, secio, yamux, TransportTimeout};
+use libp2p::{mplex, secio, yamux, core::transport::timeout::TransportTimeout};
 use std::collections::HashMap;
 use std::io::Error;
 use std::time::Duration;
@@ -23,6 +23,7 @@ type P2PRawSwarm = RawSwarm<
     CITAInEvent,
     CITAOutEvent,
     CITANodeHandler<Substream<StreamMuxerBox>>,
+    Error
 >;
 
 #[derive(Debug)]
@@ -311,8 +312,11 @@ where
                     }
                     RawSwarmEvent::DialError {
                         multiaddr, error, ..
+                    } => {
+                        error!("Dial {:?} err: {}", multiaddr, error);
+                        continue;
                     }
-                    | RawSwarmEvent::UnknownPeerDialError {
+                    RawSwarmEvent::UnknownPeerDialError {
                         multiaddr, error, ..
                     } => {
                         error!("Dial {:?} err: {}", multiaddr, error);

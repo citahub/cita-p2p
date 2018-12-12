@@ -195,6 +195,7 @@ where
     type OutEvent = CITAOutEvent;
     type OutboundOpenInfo = ();
     type Substream = Substream;
+    type Error = Error;
 
     fn inject_substream(
         &mut self,
