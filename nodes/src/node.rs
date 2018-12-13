@@ -261,27 +261,31 @@ fn main() {
                                         MessageType::PassShareAddr => {
                                             info!("in passsharaddr");
                                             let addr = msg.data;
-                                            nas.node_addrs.entry(addr.clone()).or_insert(0);
-                                            info!("nas {:?}", nas);
+                                            //nas.node_addrs.entry(addr.clone()).or_insert(0);
 
-                                            let mut other_neigbors = Vec::new();
-                                            let node_conns = nas.node_conns.clone();
-                                            for (key, _) in node_conns {
-                                                if key != index {
-                                                    other_neigbors.push(key.clone());
+                                            if nas.node_addrs.get(&addr).is_none() {
+                                                nas.node_addrs.insert(addr.clone(), 0);
+                                                info!("nas {:?}", nas);
+
+                                                let mut other_neigbors = Vec::new();
+                                                let node_conns = nas.node_conns.clone();
+                                                for (key, _) in node_conns {
+                                                    if key != index {
+                                                        other_neigbors.push(key.clone());
+                                                    }
                                                 }
-                                            }
 
-                                            info!("other_neigbors {:?}", other_neigbors);
-                                            let pass_share_addr = Message {
-                                                mtype: MessageType::PassShareAddr,
-                                                data: addr.clone(),
-                                                timestamp: 0
-                                            };
-                                            info!("pass_share_addr {:?}", pass_share_addr);
-                                            let pass_share_addr_str = serde_json::to_string(&pass_share_addr).unwrap(); 
-                                            if other_neigbors.len() > 0 {
-                                                let _ = task_sender.unbounded_send(Task::Messages(vec![(other_neigbors, 0, pass_share_addr_str.into_bytes() )]));
+                                                if other_neigbors.len() > 0 {
+                                                    info!("other_neigbors {:?}", other_neigbors);
+                                                    let pass_share_addr = Message {
+                                                        mtype: MessageType::PassShareAddr,
+                                                        data: addr.clone(),
+                                                        timestamp: 0
+                                                    };
+                                                    info!("pass_share_addr {:?}", pass_share_addr);
+                                                    let pass_share_addr_str = serde_json::to_string(&pass_share_addr).unwrap(); 
+                                                    let _ = task_sender.unbounded_send(Task::Messages(vec![(other_neigbors, 0, pass_share_addr_str.into_bytes() )]));
+                                                }
                                             }
 
                                         },
